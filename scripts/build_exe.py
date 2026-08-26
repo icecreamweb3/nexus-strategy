@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """在 Windows 上使用 PyInstaller 打包 Nexus Strategy。"""
 import argparse
+import importlib.util
 import os
 import shutil
 import subprocess
@@ -10,6 +11,12 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DIST_DIR = PROJECT_ROOT / "dist"
+REQUIRED_MODULES = {
+    "PyInstaller": "pyinstaller",
+    "PyQt5": "PyQt5",
+    "dotenv": "python-dotenv",
+    "openpyxl": "openpyxl",
+}
 
 
 def parse_args():
@@ -27,10 +34,11 @@ def main() -> int:
         print("请在 Windows 中运行 scripts\\build_exe.bat。", file=sys.stderr)
         return 2
 
-    try:
-        import PyInstaller  # noqa: F401
-    except ImportError:
-        print("未安装 PyInstaller，请先运行：pip install -r requirements.txt", file=sys.stderr)
+    missing = [package for module, package in REQUIRED_MODULES.items()
+               if importlib.util.find_spec(module) is None]
+    if missing:
+        print(f"缺少打包依赖：{', '.join(missing)}", file=sys.stderr)
+        print("请先运行：pip install -r requirements.txt", file=sys.stderr)
         return 2
 
     data_separator = os.pathsep
@@ -50,8 +58,17 @@ def main() -> int:
         str(PROJECT_ROOT),
         "--add-data",
         f"{PROJECT_ROOT / 'app' / 'lang'}{data_separator}app/lang",
-        "--hidden-import",
-        "openpyxl",
+        # 显式收集全部运行依赖、Qt插件、子模块、数据文件和包元数据。
+        "--collect-all", "PyQt5",
+        "--collect-all", "openpyxl",
+        "--collect-all", "dotenv",
+        "--copy-metadata", "PyQt5",
+        "--copy-metadata", "openpyxl",
+        "--copy-metadata", "python-dotenv",
+        "--hidden-import", "openpyxl",
+        "--hidden-import", "openpyxl.cell._writer",
+        "--hidden-import", "openpyxl.styles",
+        "--hidden-import", "et_xmlfile",
         "--onedir" if args.onedir else "--onefile",
         "--console" if args.console else "--windowed",
     ]
@@ -72,6 +89,8 @@ def main() -> int:
 
     executable = output_dir / f"{args.name}.exe"
     print(f"构建完成：{executable}")
+    print("Python运行时、PyQt5、openpyxl和python-dotenv均已包含在构建产物中。")
+    print("目标电脑无需安装Python或pip依赖。")
     print("程序运行日志和回测日志将在可执行文件旁的 logs 文件夹中生成。")
     return 0
 

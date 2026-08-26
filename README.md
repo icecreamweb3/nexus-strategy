@@ -32,7 +32,7 @@ Windows 环境安装依赖后运行：
 scripts\build_exe.bat
 ```
 
-默认生成单文件 GUI 程序 `dist\NexusStrategy.exe`，并复制 `.env.example` 到输出目录。可选参数：
+默认生成单文件 GUI 程序 `dist\NexusStrategy.exe`，并复制 `.env.example` 到输出目录。Python 运行时、PyQt5（含 Qt 平台插件）、openpyxl、python-dotenv 及其递归依赖都会包含在构建产物中，目标电脑无需安装 Python 或 pip 包。可选参数：
 
 ```bat
 scripts\build_exe.bat --console       rem 保留控制台，便于排错
