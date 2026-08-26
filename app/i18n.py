@@ -31,7 +31,11 @@ class I18n(QObject):
             self.language_changed.emit(code)
 
     def tr(self, key: str, **kwargs) -> str:
-        text = self._catalogs.get(self._lang, {}).get(key)
+        return self.tr_for(self._lang, key, **kwargs)
+
+    def tr_for(self, code: str, key: str, **kwargs) -> str:
+        """使用指定语言翻译，不改变当前界面语言。"""
+        text = self._catalogs.get(code, {}).get(key)
         if text is None:
             text = self._catalogs.get(ZH, {}).get(key, key)
         return text.format(**kwargs) if kwargs else text

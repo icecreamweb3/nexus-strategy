@@ -9,14 +9,15 @@ from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
     QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QGridLayout, QGroupBox,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMessageBox, QPushButton,
-    QSpinBox, QTableWidget, QTableWidgetItem, QTextEdit, QVBoxLayout, QWidget,
+    QSizePolicy, QSpinBox, QTableWidget, QTableWidgetItem, QTextEdit,
+    QVBoxLayout, QWidget,
 )
 
 from app.backtest.data_loader import DataLoadError, load_klines
 from app.backtest.engine import BacktestEngine, OrderParams, StrategyParams
 from app.backtest.stats import compute_stats
-from app.i18n import tr
-from app.logger import get_logger
+from app.i18n import i18n, tr
+from app.logger import create_backtest_log_path, get_logger
 
 
 class BacktestWorker(QThread):
@@ -29,7 +30,9 @@ class BacktestWorker(QThread):
         self._klines = klines
         self._sp = sp
         self._op = op
+        self._language = i18n().lang
         self._engine = None
+        self.log_path = ""
 
     def cancel(self):
         if self._engine is not None:
@@ -37,11 +40,18 @@ class BacktestWorker(QThread):
 
     def run(self):
         try:
-            self._engine = BacktestEngine(
-                self._klines, self._sp, self._op,
-                log=lambda msg, is_trigger=False: self.log_line.emit(msg, is_trigger),
-            )
-            trades = self._engine.run()
+            self.log_path = create_backtest_log_path()
+            with open(self.log_path, "w", encoding="utf-8", buffering=1) as log_file:
+                def record(message, is_trigger=False):
+                    log_file.write(message + "\n")
+                    self.log_line.emit(message, is_trigger)
+
+                self._engine = BacktestEngine(
+                    self._klines, self._sp, self._op, log=record,
+                    translate=lambda key, **kwargs: i18n().tr_for(
+                        self._language, key, **kwargs),
+                )
+                trades = self._engine.run()
             self.finished_ok.emit(trades, compute_stats(trades))
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(str(exc))
@@ -52,6 +62,7 @@ def _dspin(value: float, maximum: float = 1e9, decimals: int = 2, minimum: float
     w.setRange(minimum, maximum)
     w.setDecimals(decimals)
     w.setValue(value)
+    w.setAlignment(Qt.AlignLeft)
     return w
 
 
@@ -59,6 +70,7 @@ def _ispin(value: int, maximum: int = 100000, minimum: int = 0) -> QSpinBox:
     w = QSpinBox()
     w.setRange(minimum, maximum)
     w.setValue(value)
+    w.setAlignment(Qt.AlignLeft)
     return w
 
 
@@ -106,6 +118,12 @@ class BacktestTab(QWidget):
         self._reg(self.btn_file.setText, "btn_choose_file")
         self.btn_file.clicked.connect(self._choose_file)
         lay.addWidget(self.btn_file)
+
+        self.btn_start = QPushButton()
+        self._reg(self.btn_start.setText, "start_backtest")
+        self.btn_start.setEnabled(False)
+        self.btn_start.clicked.connect(self._start_backtest)
+        lay.addWidget(self.btn_start)
         return box
 
     def _build_params_section(self) -> QWidget:
@@ -124,91 +142,116 @@ class BacktestTab(QWidget):
         self.btn_import_params = QPushButton()
         self._reg(self.btn_import_params.setText, "import_params")
         self.btn_import_params.clicked.connect(self._import_params)
-        grid.addWidget(self.btn_export_params, 0, 0)
-        grid.addWidget(self.btn_import_params, 0, 1)
+        grid.addWidget(self.btn_export_params, 0, 0, 1, 2)
+        grid.addWidget(self.btn_import_params, 0, 2, 1, 2)
 
         r = 1
-        self.chk_trend = QCheckBox()
-        self.chk_trend.setChecked(True)
-        self._reg(self.chk_trend.setText, "trend_strategy")
-        grid.addWidget(self.chk_trend, r, 0, 1, 2)
-        r += 1
-        self.sp_trend_count = _ispin(2)
-        self.sp_trend_cum = _dspin(0.06, decimals=4)
-        self.sp_trend_last_n = _ispin(1, minimum=1)
-        self.sp_trend_single = _dspin(0.04, decimals=4)
-        for key, w in (("trend_count", self.sp_trend_count),
-                       ("trend_cum_pct", self.sp_trend_cum),
-                       ("trend_last_n", self.sp_trend_last_n),
-                       ("trend_single_pct", self.sp_trend_single)):
-            grid.addWidget(self._label(key), r, 0)
-            grid.addWidget(w, r, 1)
-            r += 1
-
-        self.chk_pattern = QCheckBox()
-        self.chk_pattern.setChecked(True)
-        self._reg(self.chk_pattern.setText, "pattern_strategy")
-        grid.addWidget(self.chk_pattern, r, 0, 1, 2)
-        r += 1
-        self.sp_long_bear_count = _ispin(2)
-        self.sp_long_bear_up = _dspin(0.8, decimals=4)
-        self.sp_long_bear_low = _dspin(0.7, decimals=4)
-        self.sp_rev_bull_up = _dspin(0.6, decimals=4)
-        self.sp_rev_bull_low = _dspin(0.5, decimals=4)
-        for key, w in (("pattern_long", self.sp_long_bear_count),
-                       ("bear_body_upper", self.sp_long_bear_up),
-                       ("bear_body_lower", self.sp_long_bear_low),
-                       ("rev_bull_body_upper", self.sp_rev_bull_up),
-                       ("rev_bull_body_lower", self.sp_rev_bull_low)):
-            grid.addWidget(self._label(key), r, 0)
-            grid.addWidget(w, r, 1)
-            r += 1
-        self.sp_short_bull_count = _ispin(2)
-        self.sp_short_bull_up = _dspin(0.7, decimals=4)
-        self.sp_short_bull_low = _dspin(0.8, decimals=4)
-        self.sp_rev_bear_up = _dspin(0.5, decimals=4)
-        self.sp_rev_bear_low = _dspin(0.6, decimals=4)
-        for key, w in (("pattern_short", self.sp_short_bull_count),
-                       ("bull_body_upper", self.sp_short_bull_up),
-                       ("bull_body_lower", self.sp_short_bull_low),
-                       ("rev_bear_body_upper", self.sp_rev_bear_up),
-                       ("rev_bear_body_lower", self.sp_rev_bear_low)):
-            grid.addWidget(self._label(key), r, 0)
-            grid.addWidget(w, r, 1)
-            r += 1
-
-        self.chk_reverse = QCheckBox()
-        self.chk_reverse.setChecked(True)
-        self._reg(self.chk_reverse.setText, "reverse_strategy")
-        grid.addWidget(self.chk_reverse, r, 0, 1, 2)
-        r += 1
-        self.sp_body_low = _dspin(1.0, decimals=4)
-        self.sp_body_high = _dspin(1000000.0, decimals=4)
-        for key, w in (("body_ratio_low", self.sp_body_low),
-                       ("body_ratio_high", self.sp_body_high)):
-            grid.addWidget(self._label(key), r, 0)
-            grid.addWidget(w, r, 1)
-            r += 1
-
+        # 每个条件一个勾选框；全部勾选条件满足才确认信号
+        # 成交量：当前K线成交量 >= 前N根均量 × 阈值
         self.chk_volume = QCheckBox()
         self.chk_volume.setChecked(True)
-        self._reg(self.chk_volume.setText, "volume_strategy")
-        grid.addWidget(self.chk_volume, r, 0, 1, 2)
-        r += 1
-        self.sp_vol_ratio = _dspin(0.6, decimals=4)
-        grid.addWidget(self._label("volume_ratio"), r, 0)
-        grid.addWidget(self.sp_vol_ratio, r, 1)
+        self._reg(self.chk_volume.setText, "cond_volume")
+        self.sp_volume_prev_n = _ispin(10, minimum=1)
+        self.sp_volume_mult = _dspin(0.6, decimals=4)
+        vol_row = QWidget()
+        vol_lay = QHBoxLayout(vol_row)
+        vol_lay.setContentsMargins(0, 0, 0, 0)
+        vol_lay.addWidget(self.chk_volume)
+        vol_lay.addSpacing(16)
+        vol_lay.addWidget(self._label("cond_volume_prev_n"))
+        vol_lay.addWidget(self.sp_volume_prev_n, alignment=Qt.AlignLeft)
+        vol_lay.addSpacing(16)
+        vol_lay.addWidget(self._label("cond_volume_mult"))
+        vol_lay.addWidget(self.sp_volume_mult, alignment=Qt.AlignLeft)
+        vol_lay.addStretch(1)
+        grid.addWidget(vol_row, r, 0, 1, 4)
         r += 1
 
-        self.btn_start = QPushButton()
-        self._reg(self.btn_start.setText, "start_backtest")
-        self.btn_start.setMinimumHeight(40)
-        self.btn_start.setStyleSheet(
-            "QPushButton { background-color: #4CAF50; color: white; font-size: 15px;"
-            " font-weight: bold; border-radius: 4px; }"
-            "QPushButton:disabled { background-color: #9e9e9e; }")
-        self.btn_start.clicked.connect(self._start_backtest)
-        grid.addWidget(self.btn_start, r, 0, 1, 2)
+        self.chk_single = QCheckBox()
+        self.chk_single.setChecked(True)
+        self._reg(self.chk_single.setText, "cond_single_change")
+        self.sp_single_pct = _dspin(0.04, decimals=4)
+        self.sp_single_max_pct = _dspin(100.0, decimals=4)
+        single_row = QWidget()
+        single_lay = QHBoxLayout(single_row)
+        single_lay.setContentsMargins(0, 0, 0, 0)
+        single_lay.addWidget(self.chk_single)
+        single_lay.addSpacing(16)
+        single_lay.addWidget(self._label("cond_change_min"))
+        single_lay.addWidget(self.sp_single_pct, alignment=Qt.AlignLeft)
+        single_lay.addSpacing(16)
+        single_lay.addWidget(self._label("cond_change_max"))
+        single_lay.addWidget(self.sp_single_max_pct, alignment=Qt.AlignLeft)
+        single_lay.addStretch(1)
+        grid.addWidget(single_row, r, 0, 1, 4)
+        r += 1
+
+        self.chk_consec = QCheckBox()
+        self.chk_consec.setChecked(True)
+        self._reg(self.chk_consec.setText, "cond_consecutive")
+        self.sp_consec_count = _ispin(2, minimum=0)
+        consec_row = QWidget()
+        consec_lay = QHBoxLayout(consec_row)
+        consec_lay.setContentsMargins(0, 0, 0, 0)
+        consec_lay.addWidget(self.chk_consec)
+        consec_lay.addSpacing(16)
+        consec_lay.addWidget(self.sp_consec_count, alignment=Qt.AlignLeft)
+        consec_lay.addStretch(1)
+        grid.addWidget(consec_row, r, 0, 1, 4)
+        r += 1
+
+        self.chk_cum = QCheckBox()
+        self.chk_cum.setChecked(True)
+        self._reg(self.chk_cum.setText, "cond_cum_klines")
+        self.sp_cum_klines = _ispin(3, minimum=1)
+        self.sp_cum_pct = _dspin(0.06, decimals=4)
+        cum_row = QWidget()
+        cum_lay = QHBoxLayout(cum_row)
+        cum_lay.setContentsMargins(0, 0, 0, 0)
+        cum_lay.addWidget(self.chk_cum)
+        cum_lay.addSpacing(16)
+        cum_lay.addWidget(self.sp_cum_klines, alignment=Qt.AlignLeft)
+        cum_lay.addSpacing(16)
+        cum_lay.addWidget(self._label("cond_cum_pct"))
+        cum_lay.addWidget(self.sp_cum_pct, alignment=Qt.AlignLeft)
+        cum_lay.addStretch(1)
+        grid.addWidget(cum_row, r, 0, 1, 4)
+        r += 1
+
+        self.chk_atr = QCheckBox()
+        self.chk_atr.setChecked(True)
+        self._reg(self.chk_atr.setText, "cond_atr")
+        self.sp_atr_min = _dspin(0.0, decimals=4)
+        self.sp_atr_max = _dspin(100.0, decimals=4)
+        atr_row = QWidget()
+        atr_lay = QHBoxLayout(atr_row)
+        atr_lay.setContentsMargins(0, 0, 0, 0)
+        atr_lay.addWidget(self.chk_atr)
+        atr_lay.addSpacing(16)
+        atr_lay.addWidget(self.sp_atr_min, alignment=Qt.AlignLeft)
+        atr_lay.addWidget(QLabel("~", alignment=Qt.AlignCenter))
+        atr_lay.addWidget(self.sp_atr_max, alignment=Qt.AlignLeft)
+        atr_lay.addStretch(1)
+        grid.addWidget(atr_row, r, 0, 1, 4)
+        r += 1
+
+        # 逆势影线/实体：做多检查上影线，做空检查下影线
+        self.chk_shadow = QCheckBox()
+        self.chk_shadow.setChecked(True)
+        self._reg(self.chk_shadow.setText, "cond_shadow_body")
+        self.sp_shadow_upper = _dspin(0.5, decimals=4)
+        # 保留旧字段仅用于兼容已导出的参数文件。
+        self.sp_shadow_lower = _dspin(0.5, decimals=4)
+        sh_row = QWidget()
+        sh_lay = QHBoxLayout(sh_row)
+        sh_lay.setContentsMargins(0, 0, 0, 0)
+        sh_lay.addWidget(self.chk_shadow)
+        sh_lay.addSpacing(16)
+        sh_lay.addWidget(self._label("cond_shadow_ratio"))
+        sh_lay.addWidget(self.sp_shadow_upper, alignment=Qt.AlignLeft)
+        sh_lay.addStretch(1)
+        grid.addWidget(sh_row, r, 0, 1, 4)
+        r += 1
 
         # ---- 右：开单参数 ----
         order_box = QGroupBox()
@@ -217,21 +260,21 @@ class BacktestTab(QWidget):
 
         self.sp_position = _dspin(10000.0)
         self.sp_fee = _dspin(0.03, decimals=4)
-        self.sp_stop_loss = _dspin(500.0)
+        self.sp_stop_loss = _dspin(1.0, maximum=100.0, decimals=4)
         self.sp_cooldown = _ispin(10)
-        self.sp_take_profit = _dspin(500.0)
-        self.sp_min_tp = _dspin(100.0)
-        self.cmb_order_type = QComboBox()
-        self.sp_limit_offset = _dspin(100.0)
-        self.sp_limit_valid = _ispin(10, minimum=1)
+        self.sp_take_profit = _dspin(1.0, maximum=100.0, decimals=4)
         self.cmb_direction = QComboBox()
-        self.cmb_reverse = QComboBox()
+        self.sp_add_interval = _dspin(0.0, maximum=100.0)
+        self.sp_add_mult = _dspin(1.0, maximum=100.0)
+        self.sp_add_count = _ispin(1, maximum=100, minimum=0)
+        self.sp_max_hold = _ispin(0)
 
         row = 0
-        for key, w in (("position_size", self.sp_position), ("fee_rate", self.sp_fee)):
-            ogrid.addWidget(self._label(key), row, 0)
-            ogrid.addWidget(w, row, 1)
-            row += 1
+        ogrid.addWidget(self._label("position_size"), row, 0)
+        ogrid.addWidget(self.sp_position, row, 1)
+        ogrid.addWidget(self._label("fee_rate"), row, 2)
+        ogrid.addWidget(self.sp_fee, row, 3)
+        row += 1
         ogrid.addWidget(self._label("stop_loss_type"), row, 0)
         ogrid.addWidget(self.sp_stop_loss, row, 1)
         ogrid.addWidget(self._label("stop_cooldown"), row, 2)
@@ -239,69 +282,25 @@ class BacktestTab(QWidget):
         row += 1
         ogrid.addWidget(self._label("take_profit_type"), row, 0)
         ogrid.addWidget(self.sp_take_profit, row, 1)
-        ogrid.addWidget(self._label("min_take_profit"), row, 2)
-        ogrid.addWidget(self.sp_min_tp, row, 3)
-        row += 1
-        ogrid.addWidget(self._label("order_type"), row, 0)
-        ogrid.addWidget(self.cmb_order_type, row, 1)
-        ogrid.addWidget(self._label("limit_offset"), row, 2)
-        ogrid.addWidget(self.sp_limit_offset, row, 3)
-        ogrid.addWidget(self._label("limit_valid"), row, 4)
-        ogrid.addWidget(self.sp_limit_valid, row, 5)
         row += 1
         ogrid.addWidget(self._label("direction"), row, 0)
         ogrid.addWidget(self.cmb_direction, row, 1)
-        ogrid.addWidget(self._label("reverse_trading"), row, 2)
-        ogrid.addWidget(self.cmb_reverse, row, 3)
+        ogrid.addWidget(self._label("max_hold_klines"), row, 2)
+        ogrid.addWidget(self.sp_max_hold, row, 3)
+        row += 1
+        ogrid.addWidget(self._label("add_interval"), row, 0)
+        ogrid.addWidget(self.sp_add_interval, row, 1)
+        ogrid.addWidget(self._label("add_mult"), row, 2)
+        ogrid.addWidget(self.sp_add_mult, row, 3)
+        ogrid.addWidget(self._label("add_count"), row, 4)
+        ogrid.addWidget(self.sp_add_count, row, 5)
         row += 1
 
-        self.chk_short_look = QCheckBox()
-        self.chk_short_look.setChecked(True)
-        self.sp_short_look_n = _ispin(10, minimum=1)
-        self.sp_short_dev = _dspin(100.0)
-        self.chk_long_look = QCheckBox()
-        self.chk_long_look.setChecked(True)
-        self.sp_long_look_n = _ispin(10, minimum=1)
-        self.sp_long_dev = _dspin(100.0)
-        self.chk_rev_vol = QCheckBox()
-        self.chk_rev_vol.setChecked(True)
-        self.sp_rev_vol_n = _ispin(10, minimum=1)
-        self.sp_rev_vol_mult = _dspin(1.2, decimals=4)
-        self.chk_body_edge = QCheckBox()
-        self.chk_body_edge.setChecked(True)
-        self.sp_edge_long_n = _ispin(10, minimum=1)
-        self.sp_edge_short_n = _ispin(10, minimum=1)
-
-        ogrid.addWidget(self._label("short_lookback"), row, 0)
-        ogrid.addWidget(self.chk_short_look, row, 1)
-        ogrid.addWidget(self._label("lookback_n"), row, 2)
-        ogrid.addWidget(self.sp_short_look_n, row, 3)
-        ogrid.addWidget(self._label("deviation"), row, 4)
-        ogrid.addWidget(self.sp_short_dev, row, 5)
-        row += 1
-        ogrid.addWidget(self._label("long_lookback"), row, 0)
-        ogrid.addWidget(self.chk_long_look, row, 1)
-        ogrid.addWidget(self._label("lookback_n"), row, 2)
-        ogrid.addWidget(self.sp_long_look_n, row, 3)
-        ogrid.addWidget(self._label("deviation"), row, 4)
-        ogrid.addWidget(self.sp_long_dev, row, 5)
-        row += 1
-        ogrid.addWidget(self._label("reverse_volume_check"), row, 0)
-        ogrid.addWidget(self.chk_rev_vol, row, 1)
-        ogrid.addWidget(self._label("lookback_n"), row, 2)
-        ogrid.addWidget(self.sp_rev_vol_n, row, 3)
-        ogrid.addWidget(self._label("volume_mult"), row, 4)
-        ogrid.addWidget(self.sp_rev_vol_mult, row, 5)
-        row += 1
-        ogrid.addWidget(self._label("reverse_body_edge_check"), row, 0)
-        ogrid.addWidget(self.chk_body_edge, row, 1)
-        ogrid.addWidget(self._label("body_edge_long_n"), row, 2)
-        ogrid.addWidget(self.sp_edge_long_n, row, 3)
-        ogrid.addWidget(self._label("body_edge_short_n"), row, 4)
-        ogrid.addWidget(self.sp_edge_short_n, row, 5)
-
-        lay.addWidget(strat_box, stretch=3)
-        lay.addWidget(order_box, stretch=2)
+        # 宽度固定 60% / 40%：Ignored 策略忽略内容 sizeHint，严格按 stretch 分配
+        strat_box.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        order_box.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
+        lay.addWidget(strat_box, stretch=6)
+        lay.addWidget(order_box, stretch=4)
         return wrap
 
     def _build_results_section(self) -> QGroupBox:
@@ -386,6 +385,7 @@ class BacktestTab(QWidget):
     def retranslate(self):
         for setter, key in self._retr:
             setter(tr(key))
+        self._sync_import_button_sizes()
         self._rebuild_combos()
         self.lbl_file.setText(
             tr("loaded_file", name=os.path.basename(self.data_path), count=len(self.klines))
@@ -395,11 +395,19 @@ class BacktestTab(QWidget):
         self._show_stats()
         self._refresh_log_view()
 
+    def _sync_import_button_sizes(self):
+        """文件选择与开始回测按钮始终使用相同且能容纳文案的尺寸。"""
+        buttons = (self.btn_file, self.btn_start)
+        for button in buttons:
+            button.setMinimumSize(0, 0)
+            button.setMaximumSize(16777215, 16777215)
+        size = self.btn_file.sizeHint().expandedTo(self.btn_start.sizeHint())
+        for button in buttons:
+            button.setFixedSize(size)
+
     def _rebuild_combos(self):
         combos = (
-            (self.cmb_order_type, ("limit_order", "market_order")),
             (self.cmb_direction, ("dir_both", "dir_long", "dir_short")),
-            (self.cmb_reverse, ("enabled", "disabled")),
         )
         for combo, keys in combos:
             idx = max(combo.currentIndex(), 0)
@@ -428,6 +436,7 @@ class BacktestTab(QWidget):
         except (DataLoadError, OSError) as exc:
             QMessageBox.warning(self, tr("app_title"), tr("err_load_file", err=exc))
             return
+        self.btn_start.setEnabled(True)
         self.lbl_file.setText(tr("loaded_file", name=os.path.basename(path), count=len(self.klines)))
         get_logger().info("加载K线数据 %s (%d 条)", path, len(self.klines))
 
@@ -435,27 +444,24 @@ class BacktestTab(QWidget):
 
     def _collect_params(self):
         sp = StrategyParams(
-            trend_enabled=self.chk_trend.isChecked(),
-            trend_kline_count=self.sp_trend_count.value(),
-            trend_cum_pct=self.sp_trend_cum.value(),
-            trend_last_n=self.sp_trend_last_n.value(),
-            trend_single_pct=self.sp_trend_single.value(),
-            pattern_enabled=self.chk_pattern.isChecked(),
-            long_bear_count=self.sp_long_bear_count.value(),
-            long_bear_body_upper=self.sp_long_bear_up.value(),
-            long_bear_body_lower=self.sp_long_bear_low.value(),
-            rev_bull_body_upper=self.sp_rev_bull_up.value(),
-            rev_bull_body_lower=self.sp_rev_bull_low.value(),
-            short_bull_count=self.sp_short_bull_count.value(),
-            short_bull_body_upper=self.sp_short_bull_up.value(),
-            short_bull_body_lower=self.sp_short_bull_low.value(),
-            rev_bear_body_upper=self.sp_rev_bear_up.value(),
-            rev_bear_body_lower=self.sp_rev_bear_low.value(),
-            reverse_enabled=self.chk_reverse.isChecked(),
-            body_ratio_min=self.sp_body_low.value(),
-            body_ratio_max=self.sp_body_high.value(),
             volume_enabled=self.chk_volume.isChecked(),
-            volume_ratio=self.sp_vol_ratio.value(),
+            volume_prev_n=self.sp_volume_prev_n.value(),
+            volume_op=">=",
+            volume_mult=self.sp_volume_mult.value(),
+            single_change_enabled=self.chk_single.isChecked(),
+            single_change_pct=self.sp_single_pct.value(),
+            single_change_max_pct=self.sp_single_max_pct.value(),
+            consecutive_enabled=self.chk_consec.isChecked(),
+            consecutive_count=self.sp_consec_count.value(),
+            cum_change_enabled=self.chk_cum.isChecked(),
+            cum_klines=self.sp_cum_klines.value(),
+            cum_change_pct=self.sp_cum_pct.value(),
+            atr_enabled=self.chk_atr.isChecked(),
+            atr_min_pct=self.sp_atr_min.value(),
+            atr_max_pct=self.sp_atr_max.value(),
+            shadow_body_enabled=self.chk_shadow.isChecked(),
+            shadow_body_upper=self.sp_shadow_upper.value(),
+            shadow_body_lower=self.sp_shadow_lower.value(),
         )
         op = OrderParams(
             position_size=self.sp_position.value(),
@@ -463,24 +469,13 @@ class BacktestTab(QWidget):
             stop_loss=self.sp_stop_loss.value(),
             stop_cooldown=self.sp_cooldown.value(),
             take_profit=self.sp_take_profit.value(),
-            min_take_profit=self.sp_min_tp.value(),
-            order_type="LIMIT" if self.cmb_order_type.currentIndex() == 0 else "MARKET",
-            limit_offset=self.sp_limit_offset.value(),
-            limit_valid_klines=self.sp_limit_valid.value(),
+            order_type="MARKET",
             direction=("BOTH", "LONG", "SHORT")[self.cmb_direction.currentIndex()],
-            reverse_trading=self.cmb_reverse.currentIndex() == 0,
-            short_lookback_enabled=self.chk_short_look.isChecked(),
-            short_lookback_n=self.sp_short_look_n.value(),
-            short_deviation=self.sp_short_dev.value(),
-            long_lookback_enabled=self.chk_long_look.isChecked(),
-            long_lookback_n=self.sp_long_look_n.value(),
-            long_deviation=self.sp_long_dev.value(),
-            reverse_volume_enabled=self.chk_rev_vol.isChecked(),
-            reverse_volume_n=self.sp_rev_vol_n.value(),
-            reverse_volume_mult=self.sp_rev_vol_mult.value(),
-            reverse_body_edge_enabled=self.chk_body_edge.isChecked(),
-            body_edge_long_n=self.sp_edge_long_n.value(),
-            body_edge_short_n=self.sp_edge_short_n.value(),
+            reverse_trading=False,
+            add_interval_pct=self.sp_add_interval.value(),
+            add_mult=self.sp_add_mult.value(),
+            add_count=self.sp_add_count.value(),
+            max_hold_klines=self.sp_max_hold.value(),
         )
         return sp, op
 
@@ -504,50 +499,33 @@ class BacktestTab(QWidget):
         except (OSError, json.JSONDecodeError, TypeError) as exc:
             QMessageBox.warning(self, tr("app_title"), tr("err_load_file", err=exc))
             return
-        self.chk_trend.setChecked(sp.trend_enabled)
-        self.sp_trend_count.setValue(sp.trend_kline_count)
-        self.sp_trend_cum.setValue(sp.trend_cum_pct)
-        self.sp_trend_last_n.setValue(sp.trend_last_n)
-        self.sp_trend_single.setValue(sp.trend_single_pct)
-        self.chk_pattern.setChecked(sp.pattern_enabled)
-        self.sp_long_bear_count.setValue(sp.long_bear_count)
-        self.sp_long_bear_up.setValue(sp.long_bear_body_upper)
-        self.sp_long_bear_low.setValue(sp.long_bear_body_lower)
-        self.sp_rev_bull_up.setValue(sp.rev_bull_body_upper)
-        self.sp_rev_bull_low.setValue(sp.rev_bull_body_lower)
-        self.sp_short_bull_count.setValue(sp.short_bull_count)
-        self.sp_short_bull_up.setValue(sp.short_bull_body_upper)
-        self.sp_short_bull_low.setValue(sp.short_bull_body_lower)
-        self.sp_rev_bear_up.setValue(sp.rev_bear_body_upper)
-        self.sp_rev_bear_low.setValue(sp.rev_bear_body_lower)
-        self.chk_reverse.setChecked(sp.reverse_enabled)
-        self.sp_body_low.setValue(sp.body_ratio_min)
-        self.sp_body_high.setValue(sp.body_ratio_max)
         self.chk_volume.setChecked(sp.volume_enabled)
-        self.sp_vol_ratio.setValue(sp.volume_ratio)
+        self.sp_volume_prev_n.setValue(sp.volume_prev_n)
+        self.sp_volume_mult.setValue(sp.volume_mult)
+        self.chk_single.setChecked(sp.single_change_enabled)
+        self.sp_single_pct.setValue(sp.single_change_pct)
+        self.sp_single_max_pct.setValue(sp.single_change_max_pct)
+        self.chk_consec.setChecked(sp.consecutive_enabled)
+        self.sp_consec_count.setValue(sp.consecutive_count)
+        self.chk_cum.setChecked(sp.cum_change_enabled)
+        self.sp_cum_klines.setValue(sp.cum_klines)
+        self.sp_cum_pct.setValue(sp.cum_change_pct)
+        self.chk_atr.setChecked(sp.atr_enabled)
+        self.sp_atr_min.setValue(sp.atr_min_pct)
+        self.sp_atr_max.setValue(sp.atr_max_pct)
+        self.chk_shadow.setChecked(sp.shadow_body_enabled)
+        self.sp_shadow_upper.setValue(sp.shadow_body_upper)
+        self.sp_shadow_lower.setValue(sp.shadow_body_lower)
         self.sp_position.setValue(op.position_size)
         self.sp_fee.setValue(op.fee_rate_pct)
         self.sp_stop_loss.setValue(op.stop_loss)
         self.sp_cooldown.setValue(op.stop_cooldown)
         self.sp_take_profit.setValue(op.take_profit)
-        self.sp_min_tp.setValue(op.min_take_profit)
-        self.cmb_order_type.setCurrentIndex(0 if op.order_type == "LIMIT" else 1)
-        self.sp_limit_offset.setValue(op.limit_offset)
-        self.sp_limit_valid.setValue(op.limit_valid_klines)
         self.cmb_direction.setCurrentIndex(("BOTH", "LONG", "SHORT").index(op.direction))
-        self.cmb_reverse.setCurrentIndex(0 if op.reverse_trading else 1)
-        self.chk_short_look.setChecked(op.short_lookback_enabled)
-        self.sp_short_look_n.setValue(op.short_lookback_n)
-        self.sp_short_dev.setValue(op.short_deviation)
-        self.chk_long_look.setChecked(op.long_lookback_enabled)
-        self.sp_long_look_n.setValue(op.long_lookback_n)
-        self.sp_long_dev.setValue(op.long_deviation)
-        self.chk_rev_vol.setChecked(op.reverse_volume_enabled)
-        self.sp_rev_vol_n.setValue(op.reverse_volume_n)
-        self.sp_rev_vol_mult.setValue(op.reverse_volume_mult)
-        self.chk_body_edge.setChecked(op.reverse_body_edge_enabled)
-        self.sp_edge_long_n.setValue(op.body_edge_long_n)
-        self.sp_edge_short_n.setValue(op.body_edge_short_n)
+        self.sp_add_interval.setValue(op.add_interval_pct)
+        self.sp_add_mult.setValue(op.add_mult)
+        self.sp_add_count.setValue(op.add_count)
+        self.sp_max_hold.setValue(op.max_hold_klines)
 
     # ---------- 回测执行 ----------
 
@@ -588,6 +566,8 @@ class BacktestTab(QWidget):
         self._fill_table()
         self._refresh_log_view()
         get_logger().info("回测完成: %d 笔, 总盈亏 %.2f", stats.total_trades, stats.total_pnl)
+        if self._worker is not None and self._worker.log_path:
+            get_logger().info("本次回测日志: %s", self._worker.log_path)
 
     def _on_backtest_failed(self, err: str):
         QMessageBox.warning(self, tr("app_title"), err)
@@ -613,14 +593,15 @@ class BacktestTab(QWidget):
         color = "#d32f2f" if s.total_pnl < 0 else "#388e3c"
         self.lbl_result_1.setStyleSheet(f"color: {color};" if s.total_trades else "")
 
-    _TYPE_KEYS = {"TP": "type_tp", "SL": "type_sl", "REVERSE": "type_reverse"}
+    _TYPE_KEYS = {"TP": "type_tp", "SL": "type_sl", "TIMEOUT": "type_timeout",
+                  "END": "type_end"}
 
     def _fill_table(self):
         self.table.setRowCount(0)
         self.table.setRowCount(len(self.trades))
         for row, t in enumerate(self.trades):
             vals = (
-                f"#{t.no}", f"[{tr(self._TYPE_KEYS.get(t.exit_type, 'type_tp'))}] {t.side}",
+                f"#{t.no}", f"[{tr(self._TYPE_KEYS.get(t.exit_type, 'type_tp'))}]", t.side,
                 f"#{t.entry_kline}", f"{t.entry_price:.2f}",
                 f"#{t.exit_kline}", f"{t.exit_price:.2f}",
                 f"{t.pnl:+.2f}", f"{t.fee:.2f}",
@@ -631,7 +612,7 @@ class BacktestTab(QWidget):
                 items[1].setForeground(QColor("#d32f2f"))
             else:
                 items[1].setForeground(QColor("#388e3c"))
-            items[6].setForeground(QColor("#d32f2f" if t.pnl < 0 else "#388e3c"))
+            items[7].setForeground(QColor("#d32f2f" if t.pnl < 0 else "#388e3c"))
             for col, item in enumerate(items):
                 self.table.setItem(row, col, item)
 

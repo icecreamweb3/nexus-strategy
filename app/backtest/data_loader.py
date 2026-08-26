@@ -5,7 +5,7 @@ from typing import List
 
 # 常见列名映射（小写）
 _COL_ALIASES = {
-    "open_time": ["open_time", "time", "date", "datetime", "timestamp", "开盘时间", "时间"],
+    "open_time": ["open_time", "time", "date", "datetime", "timestamp", "开盘时间", "时间", "日期"],
     "open": ["open", "o", "开盘价"],
     "high": ["high", "h", "最高价"],
     "low": ["low", "l", "最低价"],

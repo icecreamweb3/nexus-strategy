@@ -1,14 +1,14 @@
 """策略回测引擎 / Backtest engine.
 
-逐根K线推进：
-1. 平仓检查（止盈/止损价差触价、反转信号平仓）
-2. 限价单成交检查（有效K线数内触价成交，否则撤单）
-3. 信号检测（启用的策略需全部同向）→ 开单
+逐根K线推进：信号在当前K线收盘后确认，最早在下一根K线成交。
 """
-from dataclasses import dataclass, field
-from typing import Callable, List, Optional
+from dataclasses import dataclass
+from collections import Counter
+from datetime import datetime
+from typing import Callable, List, Optional, Tuple
 
 from app.backtest.data_loader import Kline
+from app.i18n import tr
 
 LONG = "LONG"
 SHORT = "SHORT"
@@ -16,63 +16,49 @@ SHORT = "SHORT"
 
 @dataclass
 class StrategyParams:
-    trend_enabled: bool = True
-    trend_kline_count: int = 2
-    trend_cum_pct: float = 0.06
-    trend_last_n: int = 1
-    trend_single_pct: float = 0.04
-
-    pattern_enabled: bool = True
-    long_bear_count: int = 2
-    long_bear_body_upper: float = 0.8
-    long_bear_body_lower: float = 0.7
-    rev_bull_body_upper: float = 0.6
-    rev_bull_body_lower: float = 0.5
-    short_bull_count: int = 2
-    short_bull_body_upper: float = 0.7
-    short_bull_body_lower: float = 0.8
-    rev_bear_body_upper: float = 0.5
-    rev_bear_body_lower: float = 0.6
-
-    reverse_enabled: bool = True
-    body_ratio_min: float = 1.0
-    body_ratio_max: float = 1000000.0
-
     volume_enabled: bool = True
-    volume_ratio: float = 0.6
+    volume_prev_n: int = 10            # 前N根K线均量
+    volume_op: str = ">="              # 旧参数文件兼容；策略固定使用 >=
+    volume_mult: float = 0.6           # 阈值（均量 × 倍数）
+    single_change_enabled: bool = True
+    single_change_pct: float = 0.04    # 单根绝对涨跌幅下限(%)，即 C
+    single_change_max_pct: float = 100.0  # 单根绝对涨跌幅上限(%)，即 D
+    consecutive_enabled: bool = True
+    consecutive_count: int = 2         # 0/1 忽略，>=2 时检查（含信号K线）
+    cum_change_enabled: bool = True
+    cum_klines: int = 3                # 追涨追跌过滤回看K线数量（E）
+    cum_change_pct: float = 0.06       # 同方向累计涨跌幅上限(%)
+    atr_enabled: bool = True
+    atr_min_pct: float = 0.0           # ATR(14)/收盘价(%) 下限
+    atr_max_pct: float = 100.0         # ATR(14)/收盘价(%) 上限
+    shadow_body_enabled: bool = True
+    shadow_body_upper: float = 0.5     # 逆势影线/实体上限（H）
+    shadow_body_lower: float = 0.5     # 旧参数文件兼容，不再单独检查下影线
 
 
 @dataclass
 class OrderParams:
     position_size: float = 10000.0      # USDT
     fee_rate_pct: float = 0.03
-    stop_loss: float = 500.0            # 价差
+    stop_loss: float = 1.0              # 相对持仓均价的止损百分比；0 表示关闭
     stop_cooldown: int = 10             # K线数
-    take_profit: float = 500.0          # 价差
-    min_take_profit: float = 100.0
-    order_type: str = "LIMIT"           # LIMIT / MARKET
-    limit_offset: float = 100.0
-    limit_valid_klines: int = 10
+    take_profit: float = 1.0            # 相对持仓均价的止盈百分比；0 表示关闭
+    min_take_profit: float = 100.0       # 旧参数文件兼容，不再用于反转平仓
+    order_type: str = "MARKET"          # 旧参数文件兼容；回测固定下一根开盘成交
+    limit_offset: float = 100.0          # 旧参数文件兼容
+    limit_valid_klines: int = 10         # 旧参数文件兼容
     direction: str = "BOTH"             # BOTH / LONG / SHORT
-    reverse_trading: bool = True
-    short_lookback_enabled: bool = True
-    short_lookback_n: int = 10
-    short_deviation: float = 100.0
-    long_lookback_enabled: bool = True
-    long_lookback_n: int = 10
-    long_deviation: float = 100.0
-    reverse_volume_enabled: bool = True
-    reverse_volume_n: int = 10
-    reverse_volume_mult: float = 1.2
-    reverse_body_edge_enabled: bool = True
-    body_edge_long_n: int = 10
-    body_edge_short_n: int = 10
+    reverse_trading: bool = False        # 旧参数文件兼容；持仓期间不再计算信号
+    add_interval_pct: float = 0.0     # 加仓间隔(%)：相对持仓均价反向波动触发，0 表示不加仓
+    add_mult: float = 1.0             # 每次加仓金额 = 仓位大小 × 倍数
+    add_count: int = 1                # 含开仓的总次数：1 表示不加仓，2 表示加一仓
+    max_hold_klines: int = 0          # 最长持仓K线数，到期按收盘价平仓；0 表示不限制
 
 
 @dataclass
 class Trade:
     no: int
-    exit_type: str          # TP / SL / REVERSE
+    exit_type: str          # TP / SL / TIMEOUT / END
     side: str               # LONG / SHORT
     entry_kline: int
     entry_price: float
@@ -86,162 +72,332 @@ class Trade:
 class _Position:
     side: str
     entry_kline: int
-    entry_price: float
+    entry_price: float    # 平均开仓价（含加仓）
+    qty: float            # 持仓总数量
+    cost: float           # 入场侧总名义本金（含加仓）
+    adds: int             # 已加仓次数
 
 
-@dataclass
-class _PendingOrder:
-    side: str
-    limit_price: float
-    placed_kline: int
-
-
-def _body(k: Kline) -> float:
-    return abs(k.close - k.open)
-
-
-def _upper_shadow(k: Kline) -> float:
-    return k.high - max(k.open, k.close)
-
-
-def _lower_shadow(k: Kline) -> float:
-    return min(k.open, k.close) - k.low
-
-
-def _ratio_ge(body: float, shadow: float, threshold: float) -> bool:
-    """body/shadow >= threshold；影线为 0 时视为无穷大（通过）。"""
-    if shadow <= 0:
-        return True
-    return body / shadow >= threshold
+def _timestamp_seconds(value: str) -> Optional[float]:
+    """将常见日期字符串或秒/毫秒时间戳转换为秒。"""
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        number = float(text)
+        if abs(number) >= 1e14:
+            return number / 1_000_000
+        if abs(number) >= 1e11:
+            return number / 1_000
+        return number
+    except ValueError:
+        pass
+    try:
+        return datetime.fromisoformat(text.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
 
 
 class BacktestEngine:
     def __init__(self, klines: List[Kline], strategy: StrategyParams,
-                 order: OrderParams, log: Optional[Callable[[str, bool], None]] = None):
+                 order: OrderParams, log: Optional[Callable[[str, bool], None]] = None,
+                 translate: Optional[Callable[..., str]] = None):
         self.klines = klines
         self.sp = strategy
         self.op = order
         # log(message, is_trigger) — is_trigger=True 表示触发交易的日志
         self._log = log or (lambda msg, is_trigger=False: None)
+        self._tr = translate or tr
         self.trades: List[Trade] = []
         self.cancelled = False
+        self._timestamps = [_timestamp_seconds(k.open_time) for k in klines]
+        positive_deltas = [
+            round(self._timestamps[i] - self._timestamps[i - 1], 6)
+            for i in range(1, len(self._timestamps))
+            if self._timestamps[i] is not None and self._timestamps[i - 1] is not None
+            and self._timestamps[i] > self._timestamps[i - 1]
+        ]
+        self._expected_interval = Counter(positive_deltas).most_common(1)[0][0] \
+            if positive_deltas else None
+        self._continuous_bars = self._build_continuous_counts()
+
+    def _build_continuous_counts(self) -> List[int]:
+        """记录每根K线向前连续的根数（包含当前K线）。"""
+        if not self.klines:
+            return []
+        counts = [1]
+        for i in range(1, len(self.klines)):
+            current = self._timestamps[i]
+            previous = self._timestamps[i - 1]
+            continuous = False
+            if current is not None and previous is not None \
+                    and self._expected_interval is not None:
+                delta = current - previous
+                tolerance = max(1e-6, self._expected_interval * 1e-6)
+                continuous = abs(delta - self._expected_interval) <= tolerance
+            counts.append(counts[-1] + 1 if continuous else 1)
+        return counts
+
+    def _has_continuous_history(self, i: int, bars: int) -> bool:
+        return 0 <= i < len(self._continuous_bars) \
+            and self._continuous_bars[i] >= bars
 
     # ---------------- 信号 ----------------
 
-    def _trend_signal(self, i: int) -> Optional[str]:
-        sp = self.sp
-        n = sp.trend_kline_count
-        if i < n - 1:
-            return None
-        seg = self.klines[i - n + 1:i + 1]
-        cum = (seg[-1].close - seg[0].open) / seg[0].open * 100
-        last = seg[-sp.trend_last_n:] if sp.trend_last_n <= n else seg
-        singles_ok = all(
-            abs(k.close - k.open) / k.open * 100 >= sp.trend_single_pct for k in last
-        )
-        if not singles_ok:
-            return None
-        if all(k.close > k.open for k in seg) and cum >= sp.trend_cum_pct:
-            return LONG
-        if all(k.close < k.open for k in seg) and -cum >= sp.trend_cum_pct:
-            return SHORT
-        return None
-
-    def _pattern_signal(self, i: int) -> Optional[str]:
-        sp = self.sp
-        k = self.klines[i]
-        # 做多：此前连续 long_bear_count 根阴线满足实体/影线比，当前反转为阳线
-        m = sp.long_bear_count
-        if i >= m:
-            bears = self.klines[i - m:i]
-            if all(b.close < b.open for b in bears) and all(
-                _ratio_ge(_body(b), _upper_shadow(b), sp.long_bear_body_upper)
-                and _ratio_ge(_body(b), _lower_shadow(b), sp.long_bear_body_lower)
-                for b in bears
-            ):
-                if k.close > k.open \
-                        and _ratio_ge(_body(k), _upper_shadow(k), sp.rev_bull_body_upper) \
-                        and _ratio_ge(_body(k), _lower_shadow(k), sp.rev_bull_body_lower):
-                    return LONG
-        # 做空：此前连续 short_bull_count 根阳线满足比率，当前反转为阴线
-        m = sp.short_bull_count
-        if i >= m:
-            bulls = self.klines[i - m:i]
-            if all(b.close > b.open for b in bulls) and all(
-                _ratio_ge(_body(b), _upper_shadow(b), sp.short_bull_body_upper)
-                and _ratio_ge(_body(b), _lower_shadow(b), sp.short_bull_body_lower)
-                for b in bulls
-            ):
-                if k.close < k.open \
-                        and _ratio_ge(_body(k), _upper_shadow(k), sp.rev_bear_body_upper) \
-                        and _ratio_ge(_body(k), _lower_shadow(k), sp.rev_bear_body_lower):
-                    return SHORT
-        return None
-
-    def _reverse_confirm_ok(self, i: int) -> bool:
-        # 实体比阈值按实体绝对值（价格差）判断，与参数面板上下限量纲一致
-        return self.sp.body_ratio_min <= _body(self.klines[i]) <= self.sp.body_ratio_max
-
     def _volume_ok(self, i: int) -> bool:
-        if i < 10:
+        """当前成交量 >= 不含当前K线的前 A 根均量 × B。"""
+        n = self.sp.volume_prev_n
+        if n <= 0 or i < n:
             return False
-        prev = [k.volume for k in self.klines[i - 10:i]]
+        prev = [k.volume for k in self.klines[i - n:i]]
         avg = sum(prev) / len(prev)
-        if avg <= 0:
+        return self.klines[i].volume >= avg * self.sp.volume_mult
+
+    def _single_change_pct(self, i: int) -> Optional[float]:
+        """计算当前收盘相对上一收盘的有符号涨跌幅。"""
+        if i < 1:
+            return None
+        prev_close = self.klines[i - 1].close
+        if prev_close <= 0:
+            return None
+        return (self.klines[i].close - prev_close) / prev_close * 100
+
+    def _single_change_dir(self, i: int) -> Optional[str]:
+        """由当前/上一收盘涨跌确定方向，并应用 C < |涨跌幅| < D。"""
+        chg = self._single_change_pct(i)
+        if chg is None:
+            return None
+        if chg == 0:
+            return None
+        if self.sp.single_change_enabled:
+            magnitude = abs(chg)
+            if not (self.sp.single_change_pct < magnitude
+                    < self.sp.single_change_max_pct):
+                return None
+        return LONG if chg > 0 else SHORT
+
+    def _consecutive_ok(self, i: int, direction: str) -> bool:
+        """最近 N 根与信号同向；十字线可同时视为涨向或跌向。"""
+        n = self.sp.consecutive_count
+        if n <= 1:
             return True
-        return self.klines[i].volume / avg > self.sp.volume_ratio
+        if i < n - 1:
+            return False
+        seg = self.klines[i - n + 1:i + 1]
+        if direction == LONG:
+            return all(k.close >= k.open for k in seg)
+        return all(k.close <= k.open for k in seg)
+
+    def _cum_change_ok(self, i: int, direction: str) -> bool:
+        """过滤同方向追涨追跌：方向化的 E 根累计幅度必须小于 F。"""
+        lookback = self.sp.cum_klines
+        if lookback <= 0:
+            return True
+        # 例：第10根、E=6，对比第4根收盘；第6根则对比首根开盘。
+        if i + 1 < lookback:
+            return False
+        if i + 1 == lookback:
+            base = self.klines[0].open
+        else:
+            base = self.klines[i - lookback].close
+        if base <= 0:
+            return False
+        cum = (self.klines[i].close - base) / base * 100
+        directional_change = cum if direction == LONG else -cum
+        return directional_change < self.sp.cum_change_pct
+
+    def _atr_ok(self, i: int) -> bool:
+        """用信号K线之前的14根TR计算 ATR/前一根收盘价。"""
+        period = 14
+        if i < period:
+            return False
+        trs = []
+        for j in range(i - period, i):
+            k = self.klines[j]
+            if j == 0:
+                trs.append(k.high - k.low)
+                continue
+            prev_close = self.klines[j - 1].close
+            trs.append(max(k.high - k.low,
+                           abs(k.high - prev_close),
+                           abs(k.low - prev_close)))
+        close = self.klines[i - 1].close
+        if close <= 0:
+            return False
+        atr_pct = sum(trs) / period / close * 100
+        return self.sp.atr_min_pct <= atr_pct <= self.sp.atr_max_pct
+
+    def _shadow_body_ok(self, i: int, direction: str) -> bool:
+        """只检查逆势影线：做多看上影线，做空看下影线；实体为0失败。"""
+        k = self.klines[i]
+        body = abs(k.close - k.open)
+        if body == 0:
+            return False
+        upper = k.high - max(k.open, k.close)
+        lower = min(k.open, k.close) - k.low
+        adverse_shadow = upper if direction == LONG else lower
+        return adverse_shadow / body < self.sp.shadow_body_upper
 
     def _combined_signal(self, i: int) -> Optional[str]:
+        """严格按连续性→量能→涨跌→连续K→方向→其余过滤的顺序计算。"""
         sp = self.sp
-        signals = []
-        if sp.trend_enabled:
-            signals.append(self._trend_signal(i))
-        if sp.pattern_enabled:
-            signals.append(self._pattern_signal(i))
-        if sp.reverse_enabled and not self._reverse_confirm_ok(i):
-            return None
-        if sp.volume_enabled and not self._volume_ok(i):
-            return None
-        # 各策略相互独立：任一给出方向即可（多个同向才算一致，None 视为弃权）
-        directional = [s for s in signals if s is not None]
-        if not directional:
-            return None
-        return directional[0] if all(s == directional[0] for s in directional) else None
 
-    def _entry_checks_ok(self, side: str, i: int) -> bool:
-        op = self.op
+        # 2. 当前K线必须与上一根K线连续。
+        if not self._has_continuous_history(i, 2):
+            return None
+
+        # 3-4. 先确认有连续的 A 根成交量历史，再计算成交量倍数。
+        if sp.volume_enabled:
+            if sp.volume_prev_n <= 0 \
+                    or not self._has_continuous_history(i, sp.volume_prev_n + 1):
+                return None
+            if not self._volume_ok(i):
+                return None
+
+        # 5. 计算收盘涨跌幅并应用 C、D 范围。
+        change_pct = self._single_change_pct(i)
+        if change_pct is None or change_pct == 0:
+            return None
+        if sp.single_change_enabled and not (
+                sp.single_change_pct < abs(change_pct) < sp.single_change_max_pct):
+            return None
+
+        # 6. 在确定交易方向前，分别计算多、空连续K线条件。
+        if sp.consecutive_enabled and sp.consecutive_count > 1 \
+                and not self._has_continuous_history(i, sp.consecutive_count):
+            return None
+        long_consecutive = not sp.consecutive_enabled \
+            or self._consecutive_ok(i, LONG)
+        short_consecutive = not sp.consecutive_enabled \
+            or self._consecutive_ok(i, SHORT)
+
+        # 7. 由第5步的有符号涨跌幅确定方向，再选择对应连续K线结果。
+        direction = LONG if change_pct > 0 else SHORT
+        if direction == LONG and not long_consecutive:
+            return None
+        if direction == SHORT and not short_consecutive:
+            return None
+
+        # 8. 计算 E 根累计涨跌，且不允许历史窗口跨越数据缺口。
+        if sp.cum_change_enabled:
+            lookback = sp.cum_klines
+            required = lookback if i + 1 == lookback else lookback + 1
+            if lookback > 0 and not self._has_continuous_history(i, required):
+                return None
+            if not self._cum_change_ok(i, direction):
+                return None
+
+        # 9. ATR使用信号前14根，连同信号K线共需连续15根数据。
+        if sp.atr_enabled:
+            if not self._has_continuous_history(i, 15) or not self._atr_ok(i):
+                return None
+
+        # 10-12. 实体→对应方向逆势影线→影线/实体比例。
+        if sp.shadow_body_enabled:
+            k = self.klines[i]
+            body = abs(k.close - k.open)
+            if body == 0:
+                return None
+            upper = k.high - max(k.open, k.close)
+            lower = min(k.open, k.close) - k.low
+            adverse_shadow = upper if direction == LONG else lower
+            if adverse_shadow / body >= sp.shadow_body_upper:
+                return None
+
+        # 13. 所有启用条件同时通过后才返回并记录方向信号。
+        return direction
+
+    def _strategy_statuses(self, i: int) -> Tuple[bool, bool, bool, bool]:
+        """返回日志中的趋势、形态、反转(ATR)、成交比四组状态。"""
+        sp = self.sp
+        if not self._has_continuous_history(i, 2):
+            return False, False, False, False
+
+        change_pct = self._single_change_pct(i)
+        direction = None if change_pct is None or change_pct == 0 \
+            else (LONG if change_pct > 0 else SHORT)
+
+        single_ok = not sp.single_change_enabled or (
+            change_pct is not None
+            and sp.single_change_pct < abs(change_pct) < sp.single_change_max_pct)
+        consecutive_ok = not sp.consecutive_enabled or (
+            direction is not None
+            and (sp.consecutive_count <= 1
+                 or self._has_continuous_history(i, sp.consecutive_count))
+            and self._consecutive_ok(i, direction))
+        if sp.cum_change_enabled and direction is not None:
+            lookback = sp.cum_klines
+            required = lookback if i + 1 == lookback else lookback + 1
+            cumulative_ok = (lookback <= 0 or self._has_continuous_history(i, required)) \
+                and self._cum_change_ok(i, direction)
+        else:
+            cumulative_ok = not sp.cum_change_enabled
+        trend_ok = direction is not None and single_ok and consecutive_ok and cumulative_ok
+
+        pattern_ok = not sp.shadow_body_enabled or (
+            direction is not None and self._shadow_body_ok(i, direction))
+        atr_ok = not sp.atr_enabled or (
+            self._has_continuous_history(i, 15) and self._atr_ok(i))
+        volume_ok = not sp.volume_enabled or (
+            sp.volume_prev_n > 0
+            and self._has_continuous_history(i, sp.volume_prev_n + 1)
+            and self._volume_ok(i))
+        return trend_ok, pattern_ok, atr_ok, volume_ok
+
+    def _log_kline(self, i: int, statuses: Tuple[bool, bool, bool, bool]):
         k = self.klines[i]
-        if op.long_lookback_enabled and side == LONG and i >= op.long_lookback_n:
-            lowest = min(x.low for x in self.klines[i - op.long_lookback_n + 1:i + 1])
-            if k.close - lowest > op.long_deviation:
-                return False
-        if op.short_lookback_enabled and side == SHORT and i >= op.short_lookback_n:
-            highest = max(x.high for x in self.klines[i - op.short_lookback_n + 1:i + 1])
-            if highest - k.close > op.short_deviation:
-                return False
-        if op.reverse_volume_enabled and i >= op.reverse_volume_n:
-            prev_max = max(x.volume for x in self.klines[i - op.reverse_volume_n:i])
-            if prev_max > 0 and k.volume <= op.reverse_volume_mult * prev_max:
-                return False
-        if op.reverse_body_edge_enabled:
-            if side == LONG and i >= op.body_edge_long_n:
-                edge = max(max(x.open, x.close) for x in self.klines[i - op.body_edge_long_n:i])
-                if k.close <= edge:
-                    return False
-            if side == SHORT and i >= op.body_edge_short_n:
-                edge = min(min(x.open, x.close) for x in self.klines[i - op.body_edge_short_n:i])
-                if k.close >= edge:
-                    return False
-        return True
+        try:
+            timestamp = datetime.fromisoformat(
+                str(k.open_time).strip().replace("Z", "+00:00"))
+            time_text = timestamp.strftime("%Y-%m-%dT%H:%M:%S.%f") + "000"
+        except ValueError:
+            time_text = str(k.open_time)
+        marks = tuple("✓" if value else "✗" for value in statuses)
+        self._log(self._tr(
+            "log_kline", index=k.index, time=time_text, close=f"{k.close:.2f}",
+            volume=f"{k.volume:g}", trend=marks[0], pattern=marks[1],
+            reversal=marks[2], volume_status=marks[3],
+        ))
 
     # ---------------- 成交与平仓 ----------------
 
+    def _new_position(self, side: str, entry_kline: int, price: float) -> _Position:
+        qty = self.op.position_size / price
+        return _Position(side, entry_kline, price, qty, qty * price, 0)
+
+    def _try_add_position(self, position: _Position, k: Kline) -> bool:
+        """按金额倍数加一仓；间隔/倍数为0或总次数不超过1时禁用。"""
+        op = self.op
+        if op.add_interval_pct <= 0 or op.add_mult <= 0 or op.add_count <= 1:
+            return False
+        if position.adds >= op.add_count - 1:
+            return False
+        trigger = position.entry_price * (1 - op.add_interval_pct / 100) \
+            if position.side == LONG \
+            else position.entry_price * (1 + op.add_interval_pct / 100)
+        hit = k.low <= trigger if position.side == LONG else k.high >= trigger
+        if not hit or trigger <= 0:
+            return False
+        add_amount = op.position_size * op.add_mult
+        if add_amount <= 0:
+            return False
+        add_qty = add_amount / trigger
+        position.qty += add_qty
+        position.cost += add_amount
+        position.entry_price = position.cost / position.qty
+        position.adds += 1
+        self._log(self._tr(
+            "log_add", add_no=position.adds, side=position.side, kline=k.index,
+            price=f"{trigger:.2f}", amount=f"{add_amount:.2f}",
+            average=f"{position.entry_price:.2f}",
+        ), True)
+        return True
+
     def _close_trade(self, pos: _Position, exit_kline: int, exit_price: float, exit_type: str):
-        qty = self.op.position_size / pos.entry_price
         sign = 1 if pos.side == LONG else -1
-        gross = qty * (exit_price - pos.entry_price) * sign
+        gross = pos.qty * (exit_price - pos.entry_price) * sign
         rate = self.op.fee_rate_pct / 100
-        fee = qty * pos.entry_price * rate + qty * exit_price * rate
+        fee = pos.cost * rate + pos.qty * exit_price * rate
         trade = Trade(
             no=len(self.trades) + 1,
             exit_type=exit_type,
@@ -254,12 +410,14 @@ class BacktestEngine:
             fee=fee,
         )
         self.trades.append(trade)
-        self._log(
-            f"[{exit_type}] {trade.side} #{trade.no} 开仓K线#{trade.entry_kline} "
-            f"@ {trade.entry_price:.2f} → 平仓K线#{trade.exit_kline} @ {trade.exit_price:.2f} "
-            f"盈亏 {trade.pnl:+.2f} 手续费 {trade.fee:.2f}",
-            True,
-        )
+        exit_key = {"TP": "type_tp", "SL": "type_sl", "TIMEOUT": "type_timeout",
+                    "END": "type_end"}.get(exit_type, exit_type)
+        self._log(self._tr(
+            "log_close", exit_type=self._tr(exit_key), side=trade.side, no=trade.no,
+            entry_kline=trade.entry_kline, entry_price=f"{trade.entry_price:.2f}",
+            exit_kline=trade.exit_kline, exit_price=f"{trade.exit_price:.2f}",
+            pnl=f"{trade.pnl:+.2f}", fee=f"{trade.fee:.2f}",
+        ), True)
 
     # ---------------- 主循环 ----------------
 
@@ -267,21 +425,48 @@ class BacktestEngine:
         ks = self.klines
         op = self.op
         position: Optional[_Position] = None
-        pending: Optional[_PendingOrder] = None
+        entry_signal: Optional[Tuple[str, int]] = None
         cooldown_until = -1
 
         for i, k in enumerate(ks):
             if self.cancelled:
                 break
 
-            # 1. 持仓平仓检查
+            # 持仓或等待开仓时不运行信号策略，日志中的策略状态记为未通过。
+            can_scan = position is None and entry_signal is None \
+                and k.index > cooldown_until
+            bar_signal = self._combined_signal(i) if can_scan else None
+            statuses = self._strategy_statuses(i) if can_scan \
+                else (False, False, False, False)
+            self._log_kline(i, statuses)
+
+            # 14. 信号只在下一根连续K线开盘价成交；遇到数据缺口则取消。
+            if entry_signal is not None and position is None:
+                side, signal_kline = entry_signal
+                if k.index == signal_kline + 1 and self._has_continuous_history(i, 2):
+                    position = self._new_position(side, k.index, k.open)
+                    self._log(self._tr(
+                        "log_entry", side=side, kline=k.index, price=f"{k.open:.2f}",
+                        signal_kline=signal_kline,
+                    ), True)
+                else:
+                    self._log(self._tr("log_gap_cancel", signal_kline=signal_kline))
+                entry_signal = None
+
+            # 15-16. 持仓检查优先级：加仓 > 止损 > 止盈 > 最长持仓。
             if position is not None:
-                sl_price = position.entry_price - op.stop_loss if position.side == LONG \
-                    else position.entry_price + op.stop_loss
-                tp_price = position.entry_price + op.take_profit if position.side == LONG \
-                    else position.entry_price - op.take_profit
-                stopped = (k.low <= sl_price) if position.side == LONG else (k.high >= sl_price)
-                taken = (k.high >= tp_price) if position.side == LONG else (k.low <= tp_price)
+                self._try_add_position(position, k)
+
+                sl_price = position.entry_price * (1 - op.stop_loss / 100) \
+                    if position.side == LONG \
+                    else position.entry_price * (1 + op.stop_loss / 100)
+                tp_price = position.entry_price * (1 + op.take_profit / 100) \
+                    if position.side == LONG \
+                    else position.entry_price * (1 - op.take_profit / 100)
+                stopped = op.stop_loss > 0 and (
+                    k.low <= sl_price if position.side == LONG else k.high >= sl_price)
+                taken = op.take_profit > 0 and (
+                    k.high >= tp_price if position.side == LONG else k.low <= tp_price)
                 if stopped:
                     self._close_trade(position, k.index, sl_price, "SL")
                     position = None
@@ -289,59 +474,30 @@ class BacktestEngine:
                 elif taken:
                     self._close_trade(position, k.index, tp_price, "TP")
                     position = None
-                elif op.reverse_trading:
-                    sig = self._combined_signal(i)
-                    if sig is not None and sig != position.side:
-                        sign = 1 if position.side == LONG else -1
-                        unrealized = (k.close - position.entry_price) * sign
-                        if unrealized >= op.min_take_profit:
-                            self._close_trade(position, k.index, k.close, "REVERSE")
-                            position = None
+                # 未平仓时检查最长持仓时间：到期按当根K线收盘价平仓
+                if position is not None and op.max_hold_klines > 0 \
+                        and k.index - position.entry_kline + 1 >= op.max_hold_klines:
+                    self._close_trade(position, k.index, k.close, "TIMEOUT")
+                    position = None
                 if position is not None:
                     continue
                 # 平仓后同根K线不再开仓
                 continue
 
-            # 2. 限价单成交检查
-            if pending is not None:
-                if k.index > pending.placed_kline + op.limit_valid_klines:
-                    self._log(f"限价单失效撤销 {pending.side} @ {pending.limit_price:.2f}")
-                    pending = None
-                else:
-                    filled = (k.low <= pending.limit_price) if pending.side == LONG \
-                        else (k.high >= pending.limit_price)
-                    if filled:
-                        position = _Position(pending.side, k.index, pending.limit_price)
-                        self._log(
-                            f"限价单成交 {pending.side} K线#{k.index} @ {pending.limit_price:.2f}",
-                            True,
-                        )
-                        pending = None
-                        continue
-                    continue
-                continue
-
-            # 3. 信号开单
+            # 1、17. 仅空仓时寻找信号；平仓当根已在上方 continue。
             if k.index <= cooldown_until:
                 continue
-            sig = self._combined_signal(i)
+            sig = bar_signal
             if sig is None:
                 continue
             if op.direction != "BOTH" and sig != op.direction:
                 continue
-            if not self._entry_checks_ok(sig, i):
-                continue
-            if op.order_type == "MARKET":
-                position = _Position(sig, k.index, k.close)
-                self._log(f"市价开仓 {sig} K线#{k.index} @ {k.close:.2f}", True)
-            else:
-                limit_price = k.close - op.limit_offset if sig == LONG else k.close + op.limit_offset
-                pending = _PendingOrder(sig, limit_price, k.index)
-                self._log(f"挂限价单 {sig} @ {limit_price:.2f}（信号K线#{k.index} @ {k.close:.2f}）")
+            entry_signal = (sig, k.index)
+            self._log(self._tr("log_signal", side=sig, kline=k.index))
 
         # 数据结束仍有持仓：按最后收盘价平仓
         if position is not None and ks:
-            self._close_trade(position, ks[-1].index, ks[-1].close, "TP")
-        if pending is not None:
-            self._log(f"回测结束，未成交限价单撤销 {pending.side} @ {pending.limit_price:.2f}")
+            self._close_trade(position, ks[-1].index, ks[-1].close, "END")
+        if entry_signal is not None:
+            self._log(self._tr("log_no_entry_bar", signal_kline=entry_signal[1]))
         return self.trades
