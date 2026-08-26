@@ -4,6 +4,7 @@ import argparse
 import importlib.util
 import os
 import shutil
+import struct
 import subprocess
 import sys
 from pathlib import Path
@@ -32,6 +33,11 @@ def main() -> int:
     if sys.platform != "win32":
         print("错误：Windows .exe 必须在 Windows 系统上构建。", file=sys.stderr)
         print("请在 Windows 中运行 scripts\\build_exe.bat。", file=sys.stderr)
+        return 2
+
+    if sys.version_info[:2] != (3, 12) or struct.calcsize("P") * 8 != 64:
+        print("错误：打包必须使用 64 位 Python 3.12。", file=sys.stderr)
+        print("请运行 scripts\\build_exe.bat，由脚本选择正确解释器。", file=sys.stderr)
         return 2
 
     missing = [package for module, package in REQUIRED_MODULES.items()

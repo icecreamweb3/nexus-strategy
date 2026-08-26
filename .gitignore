@@ -6,6 +6,7 @@ data/
 venv/
 .venv/
 .build-venv/
+.build-venv-py312/
 build/
 dist/
 *.spec

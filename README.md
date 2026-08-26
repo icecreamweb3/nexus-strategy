@@ -32,7 +32,7 @@ Windows 环境直接运行：
 scripts\build_exe.bat
 ```
 
-脚本会自动创建或复用专用的 `.build-venv`，并通过该环境安装 `requirements.txt` 中的全部依赖后再开始打包，避免系统 Python、开发虚拟环境与打包环境依赖不一致。
+构建机需要安装 **64 位 Python 3.12**。脚本会自动创建或复用专用的 `.build-venv-py312`，并通过该环境安装 `requirements.txt` 中的全部二进制依赖后再开始打包，避免系统 Python、开发虚拟环境与打包环境依赖不一致。若未安装，请从 [Python Windows 下载页](https://www.python.org/downloads/windows/) 安装并启用 Python Launcher。
 
 默认生成单文件 GUI 程序 `dist\NexusStrategy.exe`，并复制 `.env.example` 到输出目录。Python 运行时、PyQt5（含 Qt 平台插件）、openpyxl、python-dotenv 及其递归依赖都会包含在构建产物中，目标电脑无需安装 Python 或 pip 包。可选参数：
 

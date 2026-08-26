@@ -1,24 +1,37 @@
 @echo off
 setlocal
 cd /d "%~dp0\.."
-set "BUILD_PYTHON=.build-venv\Scripts\python.exe"
+set "BUILD_ENV=.build-venv-py312"
+set "BUILD_PYTHON=%BUILD_ENV%\Scripts\python.exe"
 
 if not exist "%BUILD_PYTHON%" (
-    echo Creating isolated Windows build environment...
-    where py >nul 2>nul
+    echo Checking for 64-bit Python 3.12...
+    py -3.12 -c "import struct,sys; sys.exit(0 if struct.calcsize('P') * 8 == 64 else 1)" >nul 2>nul
     if errorlevel 1 (
-        python -m venv .build-venv
-    ) else (
-        py -3 -m venv .build-venv
+        echo.
+        echo Python 3.12 64-bit was not found.
+        echo Install 64-bit Python 3.12 from https://www.python.org/downloads/windows/
+        echo Make sure the Python Launcher ^(py^) is enabled, then run this script again.
+        exit /b 1
     )
+
+    echo Creating isolated Python 3.12 build environment...
+    py -3.12 -m venv "%BUILD_ENV%"
     if errorlevel 1 (
-        echo Failed to create .build-venv. Please install Python 3.
+        echo Failed to create %BUILD_ENV%.
         exit /b 1
     )
 )
 
 echo Installing build and runtime dependencies...
-"%BUILD_PYTHON%" -m pip install -r requirements.txt
+"%BUILD_PYTHON%" -m pip install --upgrade pip setuptools wheel
+if errorlevel 1 (
+    echo.
+    echo Failed to update packaging tools.
+    exit /b 1
+)
+
+"%BUILD_PYTHON%" -m pip install --only-binary=:all: -r requirements.txt
 if errorlevel 1 (
     echo.
     echo Dependency installation failed.

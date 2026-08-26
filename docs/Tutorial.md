@@ -28,7 +28,7 @@ python main.py
 scripts\build_exe.bat
 ```
 
-脚本会自动创建或复用专用的 `.build-venv`，在同一个 Python 环境中安装全部依赖并执行打包。默认输出为 `dist\NexusStrategy.exe`。Python 运行时、PyQt5/Qt 插件、openpyxl、python-dotenv 及其递归依赖均打包在程序中，目标电脑无需安装 Python。使用 `--console` 可保留调试控制台，使用 `--onedir` 可生成目录形式。由于 PyInstaller 不支持跨平台生成 Windows EXE，请务必在 Windows 环境运行打包脚本。打包后的 `.env` 和 `logs` 均位于 EXE 所在目录。
+构建机需要安装 64 位 Python 3.12 并启用 `py` 启动器。脚本会自动创建或复用专用的 `.build-venv-py312`，强制安装 PyQt5 5.15.11 等预编译 wheel，并在同一个 Python 环境中执行打包。默认输出为 `dist\NexusStrategy.exe`。Python 运行时、PyQt5/Qt 插件、openpyxl、python-dotenv 及其递归依赖均打包在程序中，目标电脑无需安装 Python。使用 `--console` 可保留调试控制台，使用 `--onedir` 可生成目录形式。由于 PyInstaller 不支持跨平台生成 Windows EXE，请务必在 Windows 环境运行打包脚本。打包后的 `.env` 和 `logs` 均位于 EXE 所在目录。
 
 ## 2. 回测页
 
