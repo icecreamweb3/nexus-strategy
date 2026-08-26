@@ -19,6 +19,9 @@
 
   "export_params": "Export Params",
   "import_params": "Import Params",
+  "params_exported": "Parameters exported to: {path}",
+  "params_imported": "Parameters imported from: {path}",
+  "err_params_file": "Parameter file error: {err}",
   "cond_volume": "Volume ≥ Previous Average Multiple",
   "cond_volume_prev_n": "Prev Avg K-line",
   "cond_volume_mult": "Threshold",

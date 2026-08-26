@@ -1,8 +1,6 @@
 """回测页 / Backtest tab — 按截图风格：导入数据 / 参数 / 结果 / 明细 / 日志."""
 import csv
-import json
 import os
-from dataclasses import asdict
 
 from PyQt5.QtCore import Qt, QThread, pyqtSignal
 from PyQt5.QtGui import QColor
@@ -15,7 +13,9 @@ from PyQt5.QtWidgets import (
 
 from app.backtest.data_loader import DataLoadError, load_klines
 from app.backtest.engine import BacktestEngine, OrderParams, StrategyParams
+from app.backtest.params_io import ParamsFileError, load_params, save_params
 from app.backtest.stats import compute_stats
+from app.config import APP_DIR
 from app.i18n import i18n, tr
 from app.logger import create_backtest_log_path, get_logger
 
@@ -480,24 +480,34 @@ class BacktestTab(QWidget):
         return sp, op
 
     def _export_params(self):
-        path, _ = QFileDialog.getSaveFileName(self, "", "params.json", "JSON (*.json)")
+        params_dir = os.path.join(APP_DIR, "data")
+        os.makedirs(params_dir, exist_ok=True)
+        default_path = os.path.join(params_dir, "nexus_strategy_params.inf")
+        path, _ = QFileDialog.getSaveFileName(
+            self, tr("export_params"), default_path, "Nexus Params (*.inf)")
         if not path:
             return
+        if not path.lower().endswith(".inf"):
+            path += ".inf"
         sp, op = self._collect_params()
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump({"strategy": asdict(sp), "order": asdict(op)}, f, indent=2, ensure_ascii=False)
+        try:
+            save_params(path, sp, op)
+        except OSError as exc:
+            QMessageBox.warning(self, tr("app_title"), tr("err_params_file", err=exc))
+            return
+        QMessageBox.information(self, tr("app_title"), tr("params_exported", path=path))
 
     def _import_params(self):
-        path, _ = QFileDialog.getOpenFileName(self, "", "", "JSON (*.json)")
+        params_dir = os.path.join(APP_DIR, "data")
+        os.makedirs(params_dir, exist_ok=True)
+        path, _ = QFileDialog.getOpenFileName(
+            self, tr("import_params"), params_dir, "Nexus Params (*.inf)")
         if not path:
             return
         try:
-            with open(path, encoding="utf-8") as f:
-                data = json.load(f)
-            sp = StrategyParams(**data.get("strategy", {}))
-            op = OrderParams(**data.get("order", {}))
-        except (OSError, json.JSONDecodeError, TypeError) as exc:
-            QMessageBox.warning(self, tr("app_title"), tr("err_load_file", err=exc))
+            sp, op = load_params(path)
+        except (OSError, ParamsFileError) as exc:
+            QMessageBox.warning(self, tr("app_title"), tr("err_params_file", err=exc))
             return
         self.chk_volume.setChecked(sp.volume_enabled)
         self.sp_volume_prev_n.setValue(sp.volume_prev_n)
@@ -526,6 +536,7 @@ class BacktestTab(QWidget):
         self.sp_add_mult.setValue(op.add_mult)
         self.sp_add_count.setValue(op.add_count)
         self.sp_max_hold.setValue(op.max_hold_klines)
+        QMessageBox.information(self, tr("app_title"), tr("params_imported", path=path))
 
     # ---------- 回测执行 ----------
 
