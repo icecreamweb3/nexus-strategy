@@ -5,6 +5,7 @@ logs/
 data/
 venv/
 .venv/
+.build-venv/
 build/
 dist/
 *.spec

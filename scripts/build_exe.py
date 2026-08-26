@@ -38,7 +38,8 @@ def main() -> int:
                if importlib.util.find_spec(module) is None]
     if missing:
         print(f"缺少打包依赖：{', '.join(missing)}", file=sys.stderr)
-        print("请先运行：pip install -r requirements.txt", file=sys.stderr)
+        print(f'请使用当前解释器安装："{sys.executable}" -m pip install -r requirements.txt',
+              file=sys.stderr)
         return 2
 
     data_separator = os.pathsep
