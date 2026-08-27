@@ -166,11 +166,12 @@ class SignalRuleTests(unittest.TestCase):
             log=lambda message, triggered=False: messages.append(message),
         )
         engine._log_kline(0, (False, False, False, False))
-        self.assertEqual(
-            messages[0],
+        self.assertTrue(messages[0].startswith(
             "K线 #3 | 2026-02-27T08:02:00.000000000 | 收盘价: 67409.80 | "
-            "成交量:34.946 | 趋势策略: ✗ | 形态策略: ✗ | 反转策略: ✗ | 成交比策略: ✗",
-        )
+            "成交量:34.946 | 趋势策略: ✗ | 形态策略: ✗ | 反转策略: ✗ | "
+            "成交比策略: ✗ | 检测详情: "))
+        self.assertIn("K线连续性: ✗ [1/2]", messages[0])
+        self.assertIn("单根涨跌幅: ✓ [未启用]", messages[0])
 
     def test_kline_log_supports_english_display(self):
         messages = []
@@ -184,12 +185,55 @@ class SignalRuleTests(unittest.TestCase):
             translate=lambda key, **kwargs: i18n().tr_for(EN, key, **kwargs),
         )
         engine._log_kline(0, (False, False, False, False))
-        self.assertEqual(
-            messages[0],
+        self.assertTrue(messages[0].startswith(
             "K-line #3 | 2026-02-27T08:02:00.000000000 | Close: 67409.80 | "
             "Volume:34.946 | Trend Strategy: ✗ | Pattern Strategy: ✗ | "
-            "Reversal Strategy: ✗ | Volume Ratio Strategy: ✗",
+            "Reversal Strategy: ✗ | Volume Ratio Strategy: ✗ | Check Details: "))
+        self.assertIn("K-line Continuity: ✗ [1/2]", messages[0])
+        self.assertIn("Single Change: ✓ [Disabled]", messages[0])
+
+    def test_kline_log_details_include_values_and_condition_expressions(self):
+        messages = []
+        ks = [
+            Kline(1, "0", 100, 101, 99, 100, 10),
+            Kline(2, "60", 100, 102, 99, 101, 20),
+            Kline(3, "120", 101, 102.2, 100.5, 102, 30),
+        ]
+        strategy = params(
+            volume_enabled=True, volume_prev_n=2, volume_mult=1.5,
+            single_change_enabled=True, single_change_pct=0.5,
+            single_change_max_pct=2,
+            consecutive_enabled=True, consecutive_count=2,
+            cum_change_enabled=True, cum_klines=2, cum_change_pct=3,
+            atr_enabled=True, atr_period=1, atr_min_pct=2, atr_max_pct=4,
+            shadow_body_enabled=True, shadow_body_upper=0.5,
         )
+        engine = BacktestEngine(
+            ks, strategy, OrderParams(),
+            log=lambda message, triggered=False: messages.append(message),
+        )
+
+        engine._log_kline(2, engine._strategy_statuses(2))
+
+        detail = messages[0]
+        self.assertIn("K线连续性: ✓ [3/2]", detail)
+        self.assertIn("单根涨跌幅: ✓ [|0.990099%| ∈ (0.5%, 2%)]", detail)
+        self.assertIn("连续同向K线: ✓ [2/2 (LONG)]", detail)
+        self.assertIn("累计涨跌幅: ✓ [2% < 3%", detail)
+        self.assertIn("ATR幅度: ✓ [2.9703% ∈ [2%, 4%]", detail)
+        self.assertIn("逆势影线/实体比: ✓ [0.2 < 0.5", detail)
+        self.assertIn("成交量倍数: ✓ [30 >= 22.5]", detail)
+
+    def test_kline_log_simplifies_missing_atr_history(self):
+        messages = []
+        engine = BacktestEngine(
+            [kline(1)], params(atr_enabled=True, atr_period=14), OrderParams(),
+            log=lambda message, triggered=False: messages.append(message),
+        )
+
+        engine._log_kline(0, engine._strategy_statuses(0))
+
+        self.assertIn("ATR幅度: ✗ [N/A (历史 1/15)]", messages[0])
 
 
 if __name__ == "__main__":

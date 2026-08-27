@@ -150,12 +150,17 @@ class BacktestEngine:
 
     def _volume_ok(self, i: int) -> bool:
         """当前成交量 >= 不含当前K线的前 A 根均量 × B。"""
+        metrics = self._volume_metrics(i)
+        return metrics is not None and self.klines[i].volume >= metrics[1]
+
+    def _volume_metrics(self, i: int) -> Optional[Tuple[float, float]]:
+        """返回前 A 根均量与成交量条件阈值。"""
         n = self.sp.volume_prev_n
         if n <= 0 or i < n:
-            return False
+            return None
         prev = [k.volume for k in self.klines[i - n:i]]
         avg = sum(prev) / len(prev)
-        return self.klines[i].volume >= avg * self.sp.volume_mult
+        return avg, avg * self.sp.volume_mult
 
     def _single_change_pct(self, i: int) -> Optional[float]:
         """计算当前收盘相对上一收盘的有符号涨跌幅。"""
@@ -194,27 +199,37 @@ class BacktestEngine:
 
     def _cum_change_ok(self, i: int, direction: str) -> bool:
         """过滤同方向追涨追跌：方向化的 E 根累计幅度必须小于 F。"""
+        value = self._directional_cum_change_pct(i, direction)
+        return value is not None and value < self.sp.cum_change_pct
+
+    def _directional_cum_change_pct(self, i: int, direction: str) -> Optional[float]:
+        """返回相对交易方向的累计涨跌幅。"""
         lookback = self.sp.cum_klines
         if lookback <= 0:
-            return True
+            return 0.0
         # 例：第10根、E=6，对比第4根收盘；第6根则对比首根开盘。
         if i + 1 < lookback:
-            return False
+            return None
         if i + 1 == lookback:
             base = self.klines[0].open
         else:
             base = self.klines[i - lookback].close
         if base <= 0:
-            return False
+            return None
         cum = (self.klines[i].close - base) / base * 100
-        directional_change = cum if direction == LONG else -cum
-        return directional_change < self.sp.cum_change_pct
+        return cum if direction == LONG else -cum
 
     def _atr_ok(self, i: int) -> bool:
         """用信号K线之前的 N 根TR计算 ATR/前一根收盘价。"""
+        atr_pct = self._atr_pct(i)
+        return atr_pct is not None \
+            and self.sp.atr_min_pct <= atr_pct <= self.sp.atr_max_pct
+
+    def _atr_pct(self, i: int) -> Optional[float]:
+        """返回信号 K 线之前 N 根的 ATR 百分比。"""
         period = self.sp.atr_period
         if period <= 0 or i < period:
-            return False
+            return None
         trs = []
         for j in range(i - period, i):
             k = self.klines[j]
@@ -227,20 +242,24 @@ class BacktestEngine:
                            abs(k.low - prev_close)))
         close = self.klines[i - 1].close
         if close <= 0:
-            return False
-        atr_pct = sum(trs) / period / close * 100
-        return self.sp.atr_min_pct <= atr_pct <= self.sp.atr_max_pct
+            return None
+        return sum(trs) / period / close * 100
 
     def _shadow_body_ok(self, i: int, direction: str) -> bool:
         """只检查逆势影线：做多看上影线，做空看下影线；实体为0失败。"""
+        ratio = self._adverse_shadow_body_ratio(i, direction)
+        return ratio is not None and ratio < self.sp.shadow_body_upper
+
+    def _adverse_shadow_body_ratio(self, i: int, direction: str) -> Optional[float]:
+        """返回对应交易方向的逆势影线/实体比。"""
         k = self.klines[i]
         body = abs(k.close - k.open)
         if body == 0:
-            return False
+            return None
         upper = k.high - max(k.open, k.close)
         lower = min(k.open, k.close) - k.low
         adverse_shadow = upper if direction == LONG else lower
-        return adverse_shadow / body < self.sp.shadow_body_upper
+        return adverse_shadow / body
 
     def _combined_signal(self, i: int) -> Optional[str]:
         """严格按连续性→量能→涨跌→连续K→方向→其余过滤的顺序计算。"""
@@ -350,6 +369,128 @@ class BacktestEngine:
             and self._volume_ok(i))
         return trend_ok, pattern_ok, atr_ok, volume_ok
 
+    @staticmethod
+    def _fmt_metric(value: Optional[float], suffix: str = "") -> str:
+        if value is None:
+            return "N/A"
+        return f"{value:.6g}{suffix}"
+
+    def _check_detail(self, name_key: str, enabled: bool, passed: bool,
+                      expression: str) -> str:
+        name = self._tr(name_key)
+        if not enabled:
+            return self._tr("log_check_disabled", name=name)
+        return self._tr(
+            "log_check_detail", name=name, mark="✓" if passed else "✗",
+            expression=expression,
+        )
+
+    def _history_short(self, actual: int, required: int) -> str:
+        return self._tr("check_history_short", actual=actual, required=required)
+
+    def _strategy_details(self, i: int) -> str:
+        """生成当前 K 线各项检查的计算值与条件表达式。"""
+        sp = self.sp
+        continuous = self._continuous_bars[i] if 0 <= i < len(self._continuous_bars) else 0
+        details = [self._check_detail(
+            "check_continuity", True, continuous >= 2,
+            f"{continuous}/2",
+        )]
+
+        change = self._single_change_pct(i)
+        direction = None if change is None or change == 0 \
+            else (LONG if change > 0 else SHORT)
+        single_ok = change is not None and change != 0 \
+            and sp.single_change_pct < abs(change) < sp.single_change_max_pct
+        details.append(self._check_detail(
+            "check_single_change", sp.single_change_enabled, single_ok,
+            f"|{self._fmt_metric(change, '%')}| ∈ "
+            f"({sp.single_change_pct:g}%, {sp.single_change_max_pct:g}%)",
+        ))
+        details.append(self._check_detail(
+            "check_signal_direction", True, direction is not None,
+            direction or "N/A",
+        ))
+
+        n = sp.consecutive_count
+        consecutive_history = n <= 1 or self._has_continuous_history(i, n)
+        if direction is not None and n > 1 and i >= n - 1:
+            segment = self.klines[i - n + 1:i + 1]
+            matched = sum(
+                k.close >= k.open if direction == LONG else k.close <= k.open
+                for k in segment
+            )
+        elif n <= 1:
+            matched = max(n, 0)
+        else:
+            matched = 0
+        consecutive_ok = direction is not None and consecutive_history \
+            and self._consecutive_ok(i, direction)
+        consecutive_expr = f"{matched}/{max(n, 0)} ({direction or 'N/A'})"
+        if not consecutive_history:
+            consecutive_expr = self._history_short(continuous, max(n, 1))
+        details.append(self._check_detail(
+            "check_consecutive", sp.consecutive_enabled, consecutive_ok,
+            consecutive_expr,
+        ))
+
+        lookback = sp.cum_klines
+        required = lookback if i + 1 == lookback else lookback + 1
+        cumulative = self._directional_cum_change_pct(i, direction) \
+            if direction is not None else None
+        cumulative_ok = direction is not None \
+            and (lookback <= 0 or self._has_continuous_history(i, required)) \
+            and cumulative is not None and cumulative < sp.cum_change_pct
+        cumulative_expr = (
+            f"{self._fmt_metric(cumulative, '%')} < {sp.cum_change_pct:g}%"
+        )
+        if lookback > 0 and not self._has_continuous_history(i, required):
+            cumulative_expr = self._history_short(continuous, required)
+        details.append(self._check_detail(
+            "check_cumulative", sp.cum_change_enabled, cumulative_ok,
+            cumulative_expr,
+        ))
+
+        atr = self._atr_pct(i)
+        atr_history = self._has_continuous_history(i, sp.atr_period + 1)
+        atr_ok = atr_history and atr is not None \
+            and sp.atr_min_pct <= atr <= sp.atr_max_pct
+        atr_expr = (
+            f"{self._fmt_metric(atr, '%')} ∈ "
+            f"[{sp.atr_min_pct:g}%, {sp.atr_max_pct:g}%]"
+        )
+        if not atr_history or atr is None:
+            atr_expr = f"N/A ({self._history_short(continuous, sp.atr_period + 1)})"
+        details.append(self._check_detail(
+            "check_atr", sp.atr_enabled, atr_ok,
+            atr_expr,
+        ))
+
+        shadow_ratio = self._adverse_shadow_body_ratio(i, direction) \
+            if direction is not None else None
+        shadow_ok = shadow_ratio is not None and shadow_ratio < sp.shadow_body_upper
+        details.append(self._check_detail(
+            "check_shadow", sp.shadow_body_enabled, shadow_ok,
+            f"{self._fmt_metric(shadow_ratio)} < {sp.shadow_body_upper:g}",
+        ))
+
+        volume_metrics = self._volume_metrics(i)
+        _, volume_threshold = volume_metrics or (None, None)
+        volume_history = sp.volume_prev_n > 0 \
+            and self._has_continuous_history(i, sp.volume_prev_n + 1)
+        volume_ok = volume_history and volume_threshold is not None \
+            and self.klines[i].volume >= volume_threshold
+        volume_expr = (
+            f"{self.klines[i].volume:g} >= {self._fmt_metric(volume_threshold)}"
+        )
+        if not volume_history or volume_threshold is None:
+            volume_expr = self._history_short(continuous, sp.volume_prev_n + 1)
+        details.append(self._check_detail(
+            "check_volume", sp.volume_enabled, volume_ok,
+            volume_expr,
+        ))
+        return " ; ".join(details)
+
     def _log_kline(self, i: int, statuses: Tuple[bool, bool, bool, bool]):
         k = self.klines[i]
         try:
@@ -363,6 +504,7 @@ class BacktestEngine:
             "log_kline", index=k.index, time=time_text, close=f"{k.close:.2f}",
             volume=f"{k.volume:g}", trend=marks[0], pattern=marks[1],
             reversal=marks[2], volume_status=marks[3],
+            details=self._strategy_details(i),
         ))
 
     # ---------------- 成交与平仓 ----------------
