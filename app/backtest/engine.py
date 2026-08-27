@@ -39,7 +39,8 @@ class StrategyParams:
 
 @dataclass
 class OrderParams:
-    position_size: float = 10000.0      # USDT
+    position_size: float = 10000.0      # 初始余额（USDT）
+    initial_order_ratio: float = 1.0    # 首仓下单金额 = 初始余额 × 下单比例
     fee_rate_pct: float = 0.03
     stop_loss: float = 1.0              # 相对持仓均价的止损百分比；0 表示关闭
     stop_cooldown: int = 10             # K线数
@@ -51,7 +52,7 @@ class OrderParams:
     direction: str = "BOTH"             # BOTH / LONG / SHORT
     reverse_trading: bool = False        # 旧参数文件兼容；持仓期间不再计算信号
     add_interval_pct: float = 0.0     # 加仓间隔(%)：相对持仓均价反向波动触发，0 表示不加仓
-    add_mult: float = 1.0             # 每次加仓金额 = 仓位大小 × 倍数
+    add_mult: float = 1.0             # 每次加仓金额 = 初始余额 × 倍数
     add_count: int = 1                # 含开仓的总次数：1 表示不加仓，2 表示加一仓
     max_hold_klines: int = 0          # 最长持仓K线数，到期按收盘价平仓；0 表示不限制
 
@@ -365,8 +366,9 @@ class BacktestEngine:
     # ---------------- 成交与平仓 ----------------
 
     def _new_position(self, side: str, entry_kline: int, price: float) -> _Position:
-        qty = self.op.position_size / price
-        return _Position(side, entry_kline, price, qty, qty * price, 0)
+        initial_amount = self.op.position_size * self.op.initial_order_ratio
+        qty = initial_amount / price
+        return _Position(side, entry_kline, price, qty, initial_amount, 0)
 
     def _try_add_position(self, position: _Position, k: Kline) -> bool:
         """按金额倍数加一仓；间隔/倍数为0或总次数不超过1时禁用。"""

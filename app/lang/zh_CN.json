@@ -41,7 +41,8 @@
   "start_backtest": "开始回测",
   "btn_cancel": "取消",
 
-  "position_size": "仓位大小",
+  "position_size": "初始余额",
+  "initial_order_ratio": "首仓下单比例",
   "fee_rate": "手续费率(%)",
   "stop_loss_type": "止损幅度(%)",
   "stop_cooldown": "止损冷静期(K线)",

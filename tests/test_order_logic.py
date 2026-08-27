@@ -22,6 +22,17 @@ def signal_params():
 
 
 class OrderLogicTests(unittest.TestCase):
+    def test_initial_order_amount_uses_position_size_times_ratio(self):
+        engine = BacktestEngine(
+            [], signal_params(),
+            OrderParams(position_size=10000, initial_order_ratio=0.25),
+        )
+
+        position = engine._new_position(LONG, 1, 100)
+
+        self.assertEqual(position.cost, 2500)
+        self.assertEqual(position.qty, 25)
+
     def test_add_then_stop_then_take_profit_priority_on_entry_kline(self):
         logs = []
         ks = [

@@ -263,6 +263,7 @@ class BacktestTab(QWidget):
         ogrid = QGridLayout(order_box)
 
         self.sp_position = _dspin(10000.0)
+        self.sp_initial_order_ratio = _dspin(1.0, maximum=100.0, decimals=4)
         self.sp_fee = _dspin(0.03, decimals=4)
         self.sp_stop_loss = _dspin(1.0, maximum=100.0, decimals=4)
         self.sp_cooldown = _ispin(10)
@@ -274,29 +275,42 @@ class BacktestTab(QWidget):
         self.sp_max_hold = _ispin(0)
 
         row = 0
-        ogrid.addWidget(self._label("position_size"), row, 0)
+        ogrid.addWidget(self._label("position_size"), row, 0,
+                        alignment=Qt.AlignRight | Qt.AlignVCenter)
         ogrid.addWidget(self.sp_position, row, 1)
-        ogrid.addWidget(self._label("fee_rate"), row, 2)
-        ogrid.addWidget(self.sp_fee, row, 3)
+        ogrid.addWidget(self._label("initial_order_ratio"), row, 2,
+                        alignment=Qt.AlignRight | Qt.AlignVCenter)
+        ogrid.addWidget(self.sp_initial_order_ratio, row, 3)
+        ogrid.addWidget(self._label("fee_rate"), row, 4,
+                        alignment=Qt.AlignRight | Qt.AlignVCenter)
+        ogrid.addWidget(self.sp_fee, row, 5)
         row += 1
-        ogrid.addWidget(self._label("stop_loss_type"), row, 0)
+        ogrid.addWidget(self._label("stop_loss_type"), row, 0,
+                        alignment=Qt.AlignRight | Qt.AlignVCenter)
         ogrid.addWidget(self.sp_stop_loss, row, 1)
-        ogrid.addWidget(self._label("stop_cooldown"), row, 2)
+        ogrid.addWidget(self._label("stop_cooldown"), row, 2,
+                        alignment=Qt.AlignRight | Qt.AlignVCenter)
         ogrid.addWidget(self.sp_cooldown, row, 3)
         row += 1
-        ogrid.addWidget(self._label("take_profit_type"), row, 0)
+        ogrid.addWidget(self._label("take_profit_type"), row, 0,
+                        alignment=Qt.AlignRight | Qt.AlignVCenter)
         ogrid.addWidget(self.sp_take_profit, row, 1)
         row += 1
-        ogrid.addWidget(self._label("direction"), row, 0)
+        ogrid.addWidget(self._label("direction"), row, 0,
+                        alignment=Qt.AlignRight | Qt.AlignVCenter)
         ogrid.addWidget(self.cmb_direction, row, 1)
-        ogrid.addWidget(self._label("max_hold_klines"), row, 2)
+        ogrid.addWidget(self._label("max_hold_klines"), row, 2,
+                        alignment=Qt.AlignRight | Qt.AlignVCenter)
         ogrid.addWidget(self.sp_max_hold, row, 3)
         row += 1
-        ogrid.addWidget(self._label("add_interval"), row, 0)
+        ogrid.addWidget(self._label("add_interval"), row, 0,
+                        alignment=Qt.AlignRight | Qt.AlignVCenter)
         ogrid.addWidget(self.sp_add_interval, row, 1)
-        ogrid.addWidget(self._label("add_mult"), row, 2)
+        ogrid.addWidget(self._label("add_mult"), row, 2,
+                        alignment=Qt.AlignRight | Qt.AlignVCenter)
         ogrid.addWidget(self.sp_add_mult, row, 3)
-        ogrid.addWidget(self._label("add_count"), row, 4)
+        ogrid.addWidget(self._label("add_count"), row, 4,
+                        alignment=Qt.AlignRight | Qt.AlignVCenter)
         ogrid.addWidget(self.sp_add_count, row, 5)
         row += 1
 
@@ -470,6 +484,7 @@ class BacktestTab(QWidget):
         )
         op = OrderParams(
             position_size=self.sp_position.value(),
+            initial_order_ratio=self.sp_initial_order_ratio.value(),
             fee_rate_pct=self.sp_fee.value(),
             stop_loss=self.sp_stop_loss.value(),
             stop_cooldown=self.sp_cooldown.value(),
@@ -533,6 +548,7 @@ class BacktestTab(QWidget):
         self.sp_shadow_upper.setValue(sp.shadow_body_upper)
         self.sp_shadow_lower.setValue(sp.shadow_body_lower)
         self.sp_position.setValue(op.position_size)
+        self.sp_initial_order_ratio.setValue(op.initial_order_ratio)
         self.sp_fee.setValue(op.fee_rate_pct)
         self.sp_stop_loss.setValue(op.stop_loss)
         self.sp_cooldown.setValue(op.stop_cooldown)

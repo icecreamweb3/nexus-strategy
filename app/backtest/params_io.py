@@ -17,9 +17,9 @@ STRATEGY_PARAM_NAMES = (
 )
 
 ORDER_PARAM_NAMES = (
-    "position_size", "fee_rate_pct", "stop_loss", "stop_cooldown",
-    "take_profit", "direction", "add_interval_pct", "add_mult",
-    "add_count", "max_hold_klines",
+    "position_size", "initial_order_ratio", "fee_rate_pct", "stop_loss",
+    "stop_cooldown", "take_profit", "direction", "add_interval_pct",
+    "add_mult", "add_count", "max_hold_klines",
 )
 
 

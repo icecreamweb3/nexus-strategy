@@ -25,6 +25,7 @@ class ParamsIoTests(unittest.TestCase):
         )
         order = OrderParams(
             position_size=2500,
+            initial_order_ratio=0.4,
             fee_rate_pct=0.04,
             stop_loss=1.2,
             stop_cooldown=8,
@@ -45,6 +46,7 @@ class ParamsIoTests(unittest.TestCase):
             self.assertEqual(loaded_strategy.shadow_body_upper, 0.35)
             self.assertEqual(loaded_strategy.atr_period, 21)
             self.assertEqual(loaded_order.position_size, 2500)
+            self.assertEqual(loaded_order.initial_order_ratio, 0.4)
             self.assertEqual(loaded_order.direction, "LONG")
             self.assertEqual(loaded_order.add_count, 3)
 
@@ -52,6 +54,21 @@ class ParamsIoTests(unittest.TestCase):
             config.read(path, encoding="utf-8")
             self.assertTrue(config.has_section("strategy"))
             self.assertTrue(config.has_section("order"))
+
+    def test_legacy_file_defaults_initial_order_ratio_to_one(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "legacy.inf")
+            with open(path, "w", encoding="utf-8") as output:
+                output.write(
+                    "[meta]\nformat = nexus-strategy-params\n"
+                    "[strategy]\nvolume_enabled = true\n"
+                    "[order]\nposition_size = 2500\n"
+                )
+
+            _, loaded_order = load_params(path)
+
+            self.assertEqual(loaded_order.position_size, 2500)
+            self.assertEqual(loaded_order.initial_order_ratio, 1.0)
 
     def test_invalid_inf_file_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:

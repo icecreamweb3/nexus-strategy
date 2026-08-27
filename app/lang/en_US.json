@@ -41,7 +41,8 @@
   "start_backtest": "Start Backtest",
   "btn_cancel": "Cancel",
 
-  "position_size": "Position Size",
+  "position_size": "Initial Balance",
+  "initial_order_ratio": "Initial Order Ratio",
   "fee_rate": "Fee Rate(%)",
   "stop_loss_type": "Stop Loss (%)",
   "stop_cooldown": "Stop Cooldown (K-lines)",
