@@ -262,8 +262,9 @@ class BacktestTab(QWidget):
         self._reg(order_box.setTitle, "sec_order_params")
         ogrid = QGridLayout(order_box)
 
-        self.sp_position = _dspin(10000.0)
-        self.sp_initial_order_ratio = _dspin(1.0, maximum=100.0, decimals=4)
+        self.sp_total_capital = _dspin(10000.0)
+        self.sp_split_count = _ispin(1, maximum=100000, minimum=1)
+        self.sp_leverage = _dspin(1.0, maximum=1000.0, decimals=4)
         self.sp_fee = _dspin(0.03, decimals=4)
         self.sp_stop_loss = _dspin(1.0, maximum=100.0, decimals=4)
         self.sp_cooldown = _ispin(10)
@@ -275,33 +276,35 @@ class BacktestTab(QWidget):
         self.sp_max_hold = _ispin(0)
 
         row = 0
-        ogrid.addWidget(self._label("position_size"), row, 0,
+        ogrid.addWidget(self._label("total_capital"), row, 0,
                         alignment=Qt.AlignRight | Qt.AlignVCenter)
-        ogrid.addWidget(self.sp_position, row, 1)
-        ogrid.addWidget(self._label("initial_order_ratio"), row, 2,
+        ogrid.addWidget(self.sp_total_capital, row, 1)
+        ogrid.addWidget(self._label("split_count"), row, 2,
                         alignment=Qt.AlignRight | Qt.AlignVCenter)
-        ogrid.addWidget(self.sp_initial_order_ratio, row, 3)
-        ogrid.addWidget(self._label("fee_rate"), row, 4,
+        ogrid.addWidget(self.sp_split_count, row, 3)
+        ogrid.addWidget(self._label("leverage"), row, 4,
                         alignment=Qt.AlignRight | Qt.AlignVCenter)
-        ogrid.addWidget(self.sp_fee, row, 5)
+        ogrid.addWidget(self.sp_leverage, row, 5)
         row += 1
-        ogrid.addWidget(self._label("stop_loss_type"), row, 0,
+        ogrid.addWidget(self._label("fee_rate"), row, 0,
                         alignment=Qt.AlignRight | Qt.AlignVCenter)
-        ogrid.addWidget(self.sp_stop_loss, row, 1)
-        ogrid.addWidget(self._label("stop_cooldown"), row, 2,
+        ogrid.addWidget(self.sp_fee, row, 1)
+        ogrid.addWidget(self._label("stop_loss_type"), row, 2,
                         alignment=Qt.AlignRight | Qt.AlignVCenter)
-        ogrid.addWidget(self.sp_cooldown, row, 3)
+        ogrid.addWidget(self.sp_stop_loss, row, 3)
+        ogrid.addWidget(self._label("stop_cooldown"), row, 4,
+                        alignment=Qt.AlignRight | Qt.AlignVCenter)
+        ogrid.addWidget(self.sp_cooldown, row, 5)
         row += 1
         ogrid.addWidget(self._label("take_profit_type"), row, 0,
                         alignment=Qt.AlignRight | Qt.AlignVCenter)
         ogrid.addWidget(self.sp_take_profit, row, 1)
-        row += 1
-        ogrid.addWidget(self._label("direction"), row, 0,
+        ogrid.addWidget(self._label("direction"), row, 2,
                         alignment=Qt.AlignRight | Qt.AlignVCenter)
-        ogrid.addWidget(self.cmb_direction, row, 1)
-        ogrid.addWidget(self._label("max_hold_klines"), row, 2,
+        ogrid.addWidget(self.cmb_direction, row, 3)
+        ogrid.addWidget(self._label("max_hold_klines"), row, 4,
                         alignment=Qt.AlignRight | Qt.AlignVCenter)
-        ogrid.addWidget(self.sp_max_hold, row, 3)
+        ogrid.addWidget(self.sp_max_hold, row, 5)
         row += 1
         ogrid.addWidget(self._label("add_interval"), row, 0,
                         alignment=Qt.AlignRight | Qt.AlignVCenter)
@@ -483,8 +486,9 @@ class BacktestTab(QWidget):
             shadow_body_lower=self.sp_shadow_lower.value(),
         )
         op = OrderParams(
-            position_size=self.sp_position.value(),
-            initial_order_ratio=self.sp_initial_order_ratio.value(),
+            total_capital=self.sp_total_capital.value(),
+            split_count=self.sp_split_count.value(),
+            leverage=self.sp_leverage.value(),
             fee_rate_pct=self.sp_fee.value(),
             stop_loss=self.sp_stop_loss.value(),
             stop_cooldown=self.sp_cooldown.value(),
@@ -547,8 +551,9 @@ class BacktestTab(QWidget):
         self.chk_shadow.setChecked(sp.shadow_body_enabled)
         self.sp_shadow_upper.setValue(sp.shadow_body_upper)
         self.sp_shadow_lower.setValue(sp.shadow_body_lower)
-        self.sp_position.setValue(op.position_size)
-        self.sp_initial_order_ratio.setValue(op.initial_order_ratio)
+        self.sp_total_capital.setValue(op.total_capital)
+        self.sp_split_count.setValue(op.split_count)
+        self.sp_leverage.setValue(op.leverage)
         self.sp_fee.setValue(op.fee_rate_pct)
         self.sp_stop_loss.setValue(op.stop_loss)
         self.sp_cooldown.setValue(op.stop_cooldown)

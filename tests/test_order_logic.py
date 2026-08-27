@@ -22,16 +22,34 @@ def signal_params():
 
 
 class OrderLogicTests(unittest.TestCase):
-    def test_initial_order_amount_uses_position_size_times_ratio(self):
+    def test_order_amount_uses_capital_split_count_and_leverage(self):
         engine = BacktestEngine(
             [], signal_params(),
-            OrderParams(position_size=10000, initial_order_ratio=0.25),
+            OrderParams(total_capital=100000, split_count=5, leverage=6),
         )
 
         position = engine._new_position(LONG, 1, 100)
 
-        self.assertEqual(position.cost, 2500)
-        self.assertEqual(position.qty, 25)
+        self.assertEqual(position.cost, 120000)
+        self.assertEqual(position.qty, 1200)
+
+    def test_next_order_uses_capital_remaining_after_close(self):
+        cases = (("SL", 90, 88000, 105600), ("TP", 110, 112000, 134400))
+        for exit_type, exit_price, capital, next_amount in cases:
+            with self.subTest(exit_type=exit_type):
+                engine = BacktestEngine(
+                    [], signal_params(),
+                    OrderParams(total_capital=100000, split_count=5, leverage=6,
+                                fee_rate_pct=0),
+                )
+                first = engine._new_position(LONG, 1, 100)
+
+                engine._close_trade(first, 2, exit_price, exit_type)
+                second = engine._new_position(LONG, 3, 100)
+
+                self.assertEqual(first.cost, 120000)
+                self.assertEqual(engine.current_capital, capital)
+                self.assertEqual(second.cost, next_amount)
 
     def test_add_then_stop_then_take_profit_priority_on_entry_kline(self):
         logs = []
@@ -44,7 +62,7 @@ class OrderLogicTests(unittest.TestCase):
             ks,
             signal_params(),
             OrderParams(
-                position_size=10000,
+                total_capital=10000,
                 fee_rate_pct=0,
                 order_type="MARKET",
                 add_interval_pct=10,

@@ -41,8 +41,9 @@
   "start_backtest": "Start Backtest",
   "btn_cancel": "Cancel",
 
-  "position_size": "Initial Balance",
-  "initial_order_ratio": "Initial Order Ratio",
+  "total_capital": "Total Capital",
+  "split_count": "Split Count",
+  "leverage": "Leverage",
   "fee_rate": "Fee Rate(%)",
   "stop_loss_type": "Stop Loss (%)",
   "stop_cooldown": "Stop Cooldown (K-lines)",
@@ -110,8 +111,8 @@
 
   "log_kline": "K-line #{index} | {time} | Close: {close} | Volume:{volume} | Trend Strategy: {trend} | Pattern Strategy: {pattern} | Reversal Strategy: {reversal} | Volume Ratio Strategy: {volume_status}",
   "log_add": "Add #{add_no} {side} K-line#{kline} @ {price} Amount {amount} Average {average}",
-  "log_close": "[{exit_type}] {side} #{no} Entry K-line#{entry_kline} @ {entry_price} → Exit K-line#{exit_kline} @ {exit_price} PnL {pnl} Fee {fee}",
-  "log_entry": "Open {side} K-line#{kline} @ {price} (Signal K-line#{signal_kline})",
+  "log_close": "[{exit_type}] {side} #{no} Entry K-line#{entry_kline} @ {entry_price} → Exit K-line#{exit_kline} @ {exit_price} PnL {pnl} Fee {fee} Remaining Capital {capital}",
+  "log_entry": "Open {side} K-line#{kline} @ {price}, Amount {amount} (Signal K-line#{signal_kline})",
   "log_gap_cancel": "K-line after signal #{signal_kline} is discontinuous; entry cancelled",
   "log_signal": "Signal confirmed: {side} at K-line#{kline}; waiting for next K-line open",
   "log_no_entry_bar": "Backtest ended with no entry bar after signal K-line#{signal_kline}",

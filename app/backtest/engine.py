@@ -39,8 +39,9 @@ class StrategyParams:
 
 @dataclass
 class OrderParams:
-    position_size: float = 10000.0      # 初始余额（USDT）
-    initial_order_ratio: float = 1.0    # 首仓下单金额 = 初始余额 × 下单比例
+    total_capital: float = 10000.0       # 初始总资金（USDT）
+    split_count: int = 1                 # 总资金拆分份数
+    leverage: float = 1.0                # 杠杆倍数（原 Order Rate）
     fee_rate_pct: float = 0.03
     stop_loss: float = 1.0              # 相对持仓均价的止损百分比；0 表示关闭
     stop_cooldown: int = 10             # K线数
@@ -52,7 +53,7 @@ class OrderParams:
     direction: str = "BOTH"             # BOTH / LONG / SHORT
     reverse_trading: bool = False        # 旧参数文件兼容；持仓期间不再计算信号
     add_interval_pct: float = 0.0     # 加仓间隔(%)：相对持仓均价反向波动触发，0 表示不加仓
-    add_mult: float = 1.0             # 每次加仓金额 = 初始余额 × 倍数
+    add_mult: float = 1.0             # 每次加仓金额 = 当笔基础下单金额 × 倍数
     add_count: int = 1                # 含开仓的总次数：1 表示不加仓，2 表示加一仓
     max_hold_klines: int = 0          # 最长持仓K线数，到期按收盘价平仓；0 表示不限制
 
@@ -111,6 +112,7 @@ class BacktestEngine:
         self._log = log or (lambda msg, is_trigger=False: None)
         self._tr = translate or tr
         self.trades: List[Trade] = []
+        self.current_capital = order.total_capital
         self.cancelled = False
         self._timestamps = [_timestamp_seconds(k.open_time) for k in klines]
         positive_deltas = [
@@ -365,8 +367,14 @@ class BacktestEngine:
 
     # ---------------- 成交与平仓 ----------------
 
+    def _base_order_amount(self) -> float:
+        """按最新总资金、拆分份数和杠杆计算本次名义下单金额。"""
+        if self.op.split_count <= 0 or self.current_capital <= 0:
+            return 0.0
+        return self.current_capital / self.op.split_count * self.op.leverage
+
     def _new_position(self, side: str, entry_kline: int, price: float) -> _Position:
-        initial_amount = self.op.position_size * self.op.initial_order_ratio
+        initial_amount = self._base_order_amount()
         qty = initial_amount / price
         return _Position(side, entry_kline, price, qty, initial_amount, 0)
 
@@ -383,7 +391,7 @@ class BacktestEngine:
         hit = k.low <= trigger if position.side == LONG else k.high >= trigger
         if not hit or trigger <= 0:
             return False
-        add_amount = op.position_size * op.add_mult
+        add_amount = self._base_order_amount() * op.add_mult
         if add_amount <= 0:
             return False
         add_qty = add_amount / trigger
@@ -415,6 +423,8 @@ class BacktestEngine:
             fee=fee,
         )
         self.trades.append(trade)
+        # 平仓后将净盈亏计入总资金，下一次下单随实际剩余资金动态调整。
+        self.current_capital += trade.pnl
         exit_key = {"TP": "type_tp", "SL": "type_sl", "TIMEOUT": "type_timeout",
                     "END": "type_end"}.get(exit_type, exit_type)
         self._log(self._tr(
@@ -422,6 +432,7 @@ class BacktestEngine:
             entry_kline=trade.entry_kline, entry_price=f"{trade.entry_price:.2f}",
             exit_kline=trade.exit_kline, exit_price=f"{trade.exit_price:.2f}",
             pnl=f"{trade.pnl:+.2f}", fee=f"{trade.fee:.2f}",
+            capital=f"{self.current_capital:.2f}",
         ), True)
 
     # ---------------- 主循环 ----------------
@@ -452,7 +463,7 @@ class BacktestEngine:
                     position = self._new_position(side, k.index, k.open)
                     self._log(self._tr(
                         "log_entry", side=side, kline=k.index, price=f"{k.open:.2f}",
-                        signal_kline=signal_kline,
+                        signal_kline=signal_kline, amount=f"{position.cost:.2f}",
                     ), True)
                 else:
                     self._log(self._tr("log_gap_cancel", signal_kline=signal_kline))

@@ -41,8 +41,9 @@
   "start_backtest": "开始回测",
   "btn_cancel": "取消",
 
-  "position_size": "初始余额",
-  "initial_order_ratio": "首仓下单比例",
+  "total_capital": "总资金",
+  "split_count": "拆分份数",
+  "leverage": "杠杆倍数",
   "fee_rate": "手续费率(%)",
   "stop_loss_type": "止损幅度(%)",
   "stop_cooldown": "止损冷静期(K线)",
@@ -109,8 +110,8 @@
 
   "log_kline": "K线 #{index} | {time} | 收盘价: {close} | 成交量:{volume} | 趋势策略: {trend} | 形态策略: {pattern} | 反转策略: {reversal} | 成交比策略: {volume_status}",
   "log_add": "加仓 #{add_no} {side} K线#{kline} @ {price} 金额 {amount} 均价 {average}",
-  "log_close": "[{exit_type}] {side} #{no} 开仓K线#{entry_kline} @ {entry_price} → 平仓K线#{exit_kline} @ {exit_price} 盈亏 {pnl} 手续费 {fee}",
-  "log_entry": "开仓 {side} K线#{kline} @ {price}（信号K线#{signal_kline}）",
+  "log_close": "[{exit_type}] {side} #{no} 开仓K线#{entry_kline} @ {entry_price} → 平仓K线#{exit_kline} @ {exit_price} 盈亏 {pnl} 手续费 {fee} 剩余总资金 {capital}",
+  "log_entry": "开仓 {side} K线#{kline} @ {price}，下单金额 {amount}（信号K线#{signal_kline}）",
   "log_gap_cancel": "信号K线#{signal_kline}后的K线不连续，取消开仓",
   "log_signal": "确认信号 {side} K线#{kline}，等待下一根K线开盘成交",
   "log_no_entry_bar": "回测结束，信号K线#{signal_kline}之后没有可成交K线",

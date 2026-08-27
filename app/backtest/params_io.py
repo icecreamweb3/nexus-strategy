@@ -17,7 +17,7 @@ STRATEGY_PARAM_NAMES = (
 )
 
 ORDER_PARAM_NAMES = (
-    "position_size", "initial_order_ratio", "fee_rate_pct", "stop_loss",
+    "total_capital", "split_count", "leverage", "fee_rate_pct", "stop_loss",
     "stop_cooldown", "take_profit", "direction", "add_interval_pct",
     "add_mult", "add_count", "max_hold_klines",
 )
@@ -91,10 +91,20 @@ def load_params(path: str) -> Tuple[StrategyParams, OrderParams]:
     try:
         strategy = StrategyParams(**_read_section(
             config, "strategy", strategy_defaults, STRATEGY_PARAM_NAMES))
-        order = OrderParams(**_read_section(
-            config, "order", order_defaults, ORDER_PARAM_NAMES))
+        order_values = _read_section(
+            config, "order", order_defaults, ORDER_PARAM_NAMES)
+        # 兼容旧参数文件：position_size 为总资金，initial_order_ratio 迁移为杠杆。
+        if "total_capital" not in order_values and config.has_option("order", "position_size"):
+            order_values["total_capital"] = config.getfloat("order", "position_size")
+        if "leverage" not in order_values and config.has_option("order", "initial_order_ratio"):
+            order_values["leverage"] = config.getfloat("order", "initial_order_ratio")
+        order = OrderParams(**order_values)
     except (TypeError, ValueError) as exc:
         raise ParamsFileError(str(exc)) from exc
     if order.direction not in ("BOTH", "LONG", "SHORT"):
         raise ParamsFileError(f"invalid direction: {order.direction}")
+    if order.split_count <= 0:
+        raise ParamsFileError("split_count must be greater than zero")
+    if order.leverage < 0:
+        raise ParamsFileError("leverage must not be negative")
     return strategy, order
