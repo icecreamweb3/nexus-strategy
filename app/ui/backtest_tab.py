@@ -346,7 +346,7 @@ class BacktestTab(QWidget):
         self._reg(self.btn_export_trades.setText, "export_trades")
         self.btn_export_trades.clicked.connect(self._export_trades)
         lay.addWidget(self.btn_export_trades, alignment=Qt.AlignLeft)
-        self.table = QTableWidget(0, 9)
+        self.table = QTableWidget(0, 11)
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.table.setEditTriggers(QTableWidget.NoEditTriggers)
         lay.addWidget(self.table)
@@ -440,6 +440,7 @@ class BacktestTab(QWidget):
         self.table.setHorizontalHeaderLabels([
             tr("col_no"), tr("col_type"), tr("col_side"),
             tr("col_entry_kline"), tr("col_entry_price"),
+            tr("col_amount"), tr("col_qty"),
             tr("col_exit_kline"), tr("col_exit_price"),
             tr("col_pnl"), tr("col_fee"),
         ])
@@ -641,6 +642,7 @@ class BacktestTab(QWidget):
             vals = (
                 f"#{t.no}", f"[{tr(self._TYPE_KEYS.get(t.exit_type, 'type_tp'))}]", t.side,
                 f"#{t.entry_kline}", f"{t.entry_price:.2f}",
+                f"{t.amount:.2f}", f"{t.qty:.8f}",
                 f"#{t.exit_kline}", f"{t.exit_price:.2f}",
                 f"{t.pnl:+.2f}", f"{t.fee:.2f}",
             )
@@ -650,7 +652,7 @@ class BacktestTab(QWidget):
                 items[1].setForeground(QColor("#d32f2f"))
             else:
                 items[1].setForeground(QColor("#388e3c"))
-            items[7].setForeground(QColor("#d32f2f" if t.pnl < 0 else "#388e3c"))
+            items[9].setForeground(QColor("#d32f2f" if t.pnl < 0 else "#388e3c"))
             for col, item in enumerate(items):
                 self.table.setItem(row, col, item)
 
@@ -664,11 +666,13 @@ class BacktestTab(QWidget):
             w = csv.writer(f)
             w.writerow([tr("col_no"), tr("col_type"), tr("col_side"),
                         tr("col_entry_kline"), tr("col_entry_price"),
+                        tr("col_amount"), tr("col_qty"),
                         tr("col_exit_kline"), tr("col_exit_price"),
                         tr("col_pnl"), tr("col_fee")])
             for t in self.trades:
                 w.writerow([t.no, tr(self._TYPE_KEYS.get(t.exit_type, "type_tp")), t.side,
                             t.entry_kline, f"{t.entry_price:.2f}",
+                            f"{t.amount:.2f}", f"{t.qty:.8f}",
                             t.exit_kline, f"{t.exit_price:.2f}",
                             f"{t.pnl:.2f}", f"{t.fee:.2f}"])
 

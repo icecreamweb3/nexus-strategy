@@ -80,6 +80,8 @@ class OrderLogicTests(unittest.TestCase):
         self.assertEqual(trades[0].exit_type, "SL")
         self.assertEqual(trades[0].entry_kline, 3)
         self.assertAlmostEqual(trades[0].entry_price, 94.7368421053)
+        self.assertEqual(trades[0].amount, 20000)
+        self.assertAlmostEqual(trades[0].qty, 211.1111111111)
         self.assertLess(logs.index(next(x for x in logs if x.startswith("加仓"))),
                         logs.index(next(x for x in logs if "止损" in x)))
 

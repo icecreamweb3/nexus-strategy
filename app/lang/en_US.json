@@ -83,6 +83,8 @@
   "col_side": "Side",
   "col_entry_kline": "Entry K-line",
   "col_entry_price": "Entry Price",
+  "col_amount": "Amount",
+  "col_qty": "Quantity",
   "col_exit_kline": "Exit K-line",
   "col_exit_price": "Exit Price",
   "col_pnl": "PnL",

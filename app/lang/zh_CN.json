@@ -82,6 +82,8 @@
   "col_side": "方向",
   "col_entry_kline": "开仓K线",
   "col_entry_price": "开仓价",
+  "col_amount": "金额",
+  "col_qty": "数量",
   "col_exit_kline": "平仓K线",
   "col_exit_price": "平仓价",
   "col_pnl": "盈亏",

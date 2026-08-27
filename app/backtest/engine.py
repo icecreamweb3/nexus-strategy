@@ -65,6 +65,8 @@ class Trade:
     side: str               # LONG / SHORT
     entry_kline: int
     entry_price: float
+    amount: float           # 开仓名义金额（含加仓）
+    qty: float              # 最终持仓数量（含加仓）
     exit_kline: int
     exit_price: float
     pnl: float              # 净盈亏（扣手续费）
@@ -559,6 +561,8 @@ class BacktestEngine:
             side=pos.side,
             entry_kline=pos.entry_kline,
             entry_price=pos.entry_price,
+            amount=pos.cost,
+            qty=pos.qty,
             exit_kline=exit_kline,
             exit_price=exit_price,
             pnl=gross - fee,
