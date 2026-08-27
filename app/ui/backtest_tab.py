@@ -221,12 +221,16 @@ class BacktestTab(QWidget):
         self.chk_atr = QCheckBox()
         self.chk_atr.setChecked(True)
         self._reg(self.chk_atr.setText, "cond_atr")
+        self.sp_atr_period = _ispin(14, minimum=1)
         self.sp_atr_min = _dspin(0.0, decimals=4)
         self.sp_atr_max = _dspin(100.0, decimals=4)
         atr_row = QWidget()
         atr_lay = QHBoxLayout(atr_row)
         atr_lay.setContentsMargins(0, 0, 0, 0)
         atr_lay.addWidget(self.chk_atr)
+        atr_lay.addSpacing(16)
+        atr_lay.addWidget(self._label("cond_atr_period"))
+        atr_lay.addWidget(self.sp_atr_period, alignment=Qt.AlignLeft)
         atr_lay.addSpacing(16)
         atr_lay.addWidget(self.sp_atr_min, alignment=Qt.AlignLeft)
         atr_lay.addWidget(QLabel("~", alignment=Qt.AlignCenter))
@@ -457,6 +461,7 @@ class BacktestTab(QWidget):
             cum_klines=self.sp_cum_klines.value(),
             cum_change_pct=self.sp_cum_pct.value(),
             atr_enabled=self.chk_atr.isChecked(),
+            atr_period=self.sp_atr_period.value(),
             atr_min_pct=self.sp_atr_min.value(),
             atr_max_pct=self.sp_atr_max.value(),
             shadow_body_enabled=self.chk_shadow.isChecked(),
@@ -521,6 +526,7 @@ class BacktestTab(QWidget):
         self.sp_cum_klines.setValue(sp.cum_klines)
         self.sp_cum_pct.setValue(sp.cum_change_pct)
         self.chk_atr.setChecked(sp.atr_enabled)
+        self.sp_atr_period.setValue(sp.atr_period)
         self.sp_atr_min.setValue(sp.atr_min_pct)
         self.sp_atr_max.setValue(sp.atr_max_pct)
         self.chk_shadow.setChecked(sp.shadow_body_enabled)

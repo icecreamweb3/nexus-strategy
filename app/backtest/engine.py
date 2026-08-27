@@ -29,8 +29,9 @@ class StrategyParams:
     cum_klines: int = 3                # 追涨追跌过滤回看K线数量（E）
     cum_change_pct: float = 0.06       # 同方向累计涨跌幅上限(%)
     atr_enabled: bool = True
-    atr_min_pct: float = 0.0           # ATR(14)/收盘价(%) 下限
-    atr_max_pct: float = 100.0         # ATR(14)/收盘价(%) 上限
+    atr_period: int = 14               # ATR 回看K线数量
+    atr_min_pct: float = 0.0           # ATR(N)/收盘价(%) 下限
+    atr_max_pct: float = 100.0         # ATR(N)/收盘价(%) 上限
     shadow_body_enabled: bool = True
     shadow_body_upper: float = 0.5     # 逆势影线/实体上限（H）
     shadow_body_lower: float = 0.5     # 旧参数文件兼容，不再单独检查下影线
@@ -207,9 +208,9 @@ class BacktestEngine:
         return directional_change < self.sp.cum_change_pct
 
     def _atr_ok(self, i: int) -> bool:
-        """用信号K线之前的14根TR计算 ATR/前一根收盘价。"""
-        period = 14
-        if i < period:
+        """用信号K线之前的 N 根TR计算 ATR/前一根收盘价。"""
+        period = self.sp.atr_period
+        if period <= 0 or i < period:
             return False
         trs = []
         for j in range(i - period, i):
@@ -287,9 +288,10 @@ class BacktestEngine:
             if not self._cum_change_ok(i, direction):
                 return None
 
-        # 9. ATR使用信号前14根，连同信号K线共需连续15根数据。
+        # 9. ATR使用信号前 N 根，连同信号K线共需连续 N+1 根数据。
         if sp.atr_enabled:
-            if not self._has_continuous_history(i, 15) or not self._atr_ok(i):
+            if not self._has_continuous_history(i, sp.atr_period + 1) \
+                    or not self._atr_ok(i):
                 return None
 
         # 10-12. 实体→对应方向逆势影线→影线/实体比例。
@@ -337,7 +339,8 @@ class BacktestEngine:
         pattern_ok = not sp.shadow_body_enabled or (
             direction is not None and self._shadow_body_ok(i, direction))
         atr_ok = not sp.atr_enabled or (
-            self._has_continuous_history(i, 15) and self._atr_ok(i))
+            self._has_continuous_history(i, sp.atr_period + 1)
+            and self._atr_ok(i))
         volume_ok = not sp.volume_enabled or (
             sp.volume_prev_n > 0
             and self._has_continuous_history(i, sp.volume_prev_n + 1)

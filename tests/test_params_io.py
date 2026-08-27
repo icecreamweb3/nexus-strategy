@@ -18,6 +18,7 @@ class ParamsIoTests(unittest.TestCase):
             consecutive_count=4,
             cum_klines=6,
             cum_change_pct=3.2,
+            atr_period=21,
             atr_min_pct=0.2,
             atr_max_pct=1.8,
             shadow_body_upper=0.35,
@@ -42,6 +43,7 @@ class ParamsIoTests(unittest.TestCase):
             self.assertEqual(loaded_strategy.volume_enabled, False)
             self.assertEqual(loaded_strategy.volume_prev_n, 23)
             self.assertEqual(loaded_strategy.shadow_body_upper, 0.35)
+            self.assertEqual(loaded_strategy.atr_period, 21)
             self.assertEqual(loaded_order.position_size, 2500)
             self.assertEqual(loaded_order.direction, "LONG")
             self.assertEqual(loaded_order.add_count, 3)

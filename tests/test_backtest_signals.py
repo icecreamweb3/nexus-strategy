@@ -82,6 +82,19 @@ class SignalRuleTests(unittest.TestCase):
         )
         self.assertTrue(engine._atr_ok(14))
 
+    def test_atr_period_is_configurable(self):
+        ks = [kline(i + 1, high=103, low=99, close=100) for i in range(3)]
+        ks.append(kline(4, high=1000, low=1, close=900))
+        engine = BacktestEngine(
+            ks,
+            params(atr_period=3, atr_min_pct=3.9, atr_max_pct=4.1),
+            OrderParams(),
+        )
+        self.assertTrue(engine._atr_ok(3))
+
+        engine.sp.atr_period = 4
+        self.assertFalse(engine._atr_ok(3))
+
     def test_shadow_checks_only_adverse_side_and_rejects_zero_body(self):
         ks = [
             kline(1, open_=100, high=111, low=80, close=110),

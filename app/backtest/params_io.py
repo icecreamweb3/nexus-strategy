@@ -12,7 +12,7 @@ STRATEGY_PARAM_NAMES = (
     "single_change_enabled", "single_change_pct", "single_change_max_pct",
     "consecutive_enabled", "consecutive_count",
     "cum_change_enabled", "cum_klines", "cum_change_pct",
-    "atr_enabled", "atr_min_pct", "atr_max_pct",
+    "atr_enabled", "atr_period", "atr_min_pct", "atr_max_pct",
     "shadow_body_enabled", "shadow_body_upper",
 )
 
