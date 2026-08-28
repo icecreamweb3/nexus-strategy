@@ -32,12 +32,12 @@ scripts\build_exe.bat
 
 构建机需要安装 **64 位 Python 3.12**。脚本会自动创建或复用专用的 `.build-venv-py312`，并通过该环境安装 `requirements.txt` 中的全部二进制依赖后再开始打包，避免系统 Python、开发虚拟环境与打包环境依赖不一致。若未安装，请从 [Python Windows 下载页](https://www.python.org/downloads/windows/) 安装并启用 Python Launcher。
 
-默认生成单文件 GUI 程序 `dist\NexusStrategy.exe`，并复制 `.env.example` 到输出目录。Python 运行时、PyQt5（含 Qt 平台插件）、openpyxl、python-dotenv 及其递归依赖都会包含在构建产物中，目标电脑无需安装 Python 或 pip 包。可选参数：
+该脚本面向 Live 版本，默认生成单文件 GUI 程序 `dist\NexusStrategyLive.exe`，显式打包 Binance REST/WebSocket、实时信号处理、SQLite 存储、SSL 证书和语言包，并复制 `.env.example`、创建 `logs` 与 `data` 目录。目标电脑无需安装 Python 或 pip 包。可选参数：
 
 ```bat
 scripts\build_exe.bat --console       rem 保留控制台，便于排错
 scripts\build_exe.bat --onedir        rem 生成目录形式
-scripts\build_exe.bat --name MyTrader rem 修改程序名称
+scripts\build_exe.bat --name MyTraderLive rem 修改程序名称
 ```
 
 Windows EXE 需要在 Windows 上构建。程序启动后会在 EXE 所在目录创建 `logs` 文件夹；如需设置默认语言，可将 `.env.example` 复制为 `.env` 后修改 `UI_LANGUAGE`。

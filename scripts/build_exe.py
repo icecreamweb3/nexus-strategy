@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""在 Windows 上使用 PyInstaller 打包 Nexus Strategy。"""
+"""在 Windows 上使用 PyInstaller 打包 Nexus Strategy Live。"""
 import argparse
 import importlib.util
 import os
@@ -19,12 +19,15 @@ REQUIRED_MODULES = {
     "openpyxl": "openpyxl",
     "binance": "python-binance",
     "websocket": "websocket-client",
+    "websockets": "websockets",
+    "certifi": "certifi",
 }
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Build Nexus Strategy Windows executable")
-    parser.add_argument("--name", default="NexusStrategy", help="输出程序名称")
+    parser = argparse.ArgumentParser(
+        description="Build Nexus Strategy Live Windows executable")
+    parser.add_argument("--name", default="NexusStrategyLive", help="输出程序名称")
     parser.add_argument("--onedir", action="store_true", help="生成目录包而不是单文件")
     parser.add_argument("--console", action="store_true", help="保留控制台窗口以便排错")
     return parser.parse_args()
@@ -73,11 +76,19 @@ def main() -> int:
         "--collect-all", "dotenv",
         "--collect-all", "binance",
         "--collect-all", "websocket",
+        "--collect-all", "websockets",
+        "--collect-data", "certifi",
+        # Live 版本依赖的项目包显式收集，防止动态回调模块被分析遗漏。
+        "--collect-submodules", "app.client",
+        "--collect-submodules", "app.live",
+        "--collect-submodules", "app.storage",
         "--copy-metadata", "PyQt5",
         "--copy-metadata", "openpyxl",
         "--copy-metadata", "python-dotenv",
         "--copy-metadata", "python-binance",
         "--copy-metadata", "websocket-client",
+        "--copy-metadata", "websockets",
+        "--copy-metadata", "certifi",
         "--hidden-import", "openpyxl",
         "--hidden-import", "openpyxl.cell._writer",
         "--hidden-import", "openpyxl.styles",
@@ -99,12 +110,15 @@ def main() -> int:
     if env_example.exists():
         output_dir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(env_example, output_dir / ".env.example")
+    (output_dir / "logs").mkdir(parents=True, exist_ok=True)
+    (output_dir / "data").mkdir(parents=True, exist_ok=True)
 
     executable = output_dir / f"{args.name}.exe"
     print(f"构建完成：{executable}")
-    print("Python运行时、PyQt5、openpyxl和python-dotenv均已包含在构建产物中。")
+    print("Live运行依赖（PyQt5、Binance、WebSocket、SQLite及证书）已包含。")
     print("目标电脑无需安装Python或pip依赖。")
-    print("程序运行日志和回测日志将在可执行文件旁的 logs 文件夹中生成。")
+    print("请将 .env.example 复制为 .env 并填写 Binance API 配置。")
+    print("实盘日志写入 logs，订单和持仓数据库写入 data。")
     return 0
 
 

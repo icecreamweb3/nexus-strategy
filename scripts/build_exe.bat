@@ -23,7 +23,7 @@ if not exist "%BUILD_PYTHON%" (
     )
 )
 
-echo Installing build and runtime dependencies...
+echo Installing Nexus Strategy Live build and runtime dependencies...
 "%BUILD_PYTHON%" -m pip install --upgrade pip setuptools wheel
 if errorlevel 1 (
     echo.
@@ -38,7 +38,7 @@ if errorlevel 1 (
     exit /b 1
 )
 
-echo Building executable...
+echo Building Nexus Strategy Live executable...
 "%BUILD_PYTHON%" scripts\build_exe.py %*
 
 if errorlevel 1 (
@@ -48,5 +48,5 @@ if errorlevel 1 (
 )
 
 echo.
-echo Build completed successfully.
+echo Nexus Strategy Live build completed successfully.
 endlocal
