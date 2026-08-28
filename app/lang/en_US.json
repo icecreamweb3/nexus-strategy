@@ -20,6 +20,8 @@
   "realtime_position_exists": "An open {symbol} position exists; entry signal skipped",
   "realtime_order_sent": "Sent {side} market order: {symbol}, quantity {quantity} (signal K-line #{kline})",
   "realtime_order_failed": "Live order failed: {err}",
+  "realtime_order_margin_check": "Order margin check: {symbol}, quantity {quantity}, notional {notional}, estimated required {required} {asset}, available {available} {asset}",
+  "realtime_margin_insufficient": "Insufficient available margin for {symbol}: estimated required {required} {asset}, available {available} {asset}",
   "live_trading_panel": "Live Trading",
   "live_refresh": "Refresh",
   "live_balance_short": "Balance:",
@@ -134,7 +136,7 @@
   "err_no_data": "Please import a historical data file first",
   "err_load_file": "Failed to load file: {err}",
 
-  "log_kline": "K-line #{index} | {time} | Close: {close} | Volume:{volume} | Trend Strategy: {trend} | Pattern Strategy: {pattern} | Reversal Strategy: {reversal} | Volume Ratio Strategy: {volume_status} | Check Details: {details}",
+  "log_kline": "K-line #{index} | {time} | Close: {close} | Volume:{volume} | Parameter Checks: {details}",
   "log_check_detail": "{name}: {mark} [{expression}]",
   "log_check_disabled": "{name}: ✓ [Disabled]",
   "check_continuity": "K-line Continuity",

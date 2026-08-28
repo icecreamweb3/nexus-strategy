@@ -334,44 +334,6 @@ class BacktestEngine:
         # 13. 所有启用条件同时通过后才返回并记录方向信号。
         return direction
 
-    def _strategy_statuses(self, i: int) -> Tuple[bool, bool, bool, bool]:
-        """返回日志中的趋势、形态、反转(ATR)、成交比四组状态。"""
-        sp = self.sp
-        if not self._has_continuous_history(i, 2):
-            return False, False, False, False
-
-        change_pct = self._single_change_pct(i)
-        direction = None if change_pct is None or change_pct == 0 \
-            else (LONG if change_pct > 0 else SHORT)
-
-        single_ok = not sp.single_change_enabled or (
-            change_pct is not None
-            and sp.single_change_pct < abs(change_pct) < sp.single_change_max_pct)
-        consecutive_ok = not sp.consecutive_enabled or (
-            direction is not None
-            and (sp.consecutive_count <= 1
-                 or self._has_continuous_history(i, sp.consecutive_count))
-            and self._consecutive_ok(i, direction))
-        if sp.cum_change_enabled and direction is not None:
-            lookback = sp.cum_klines
-            required = lookback if i + 1 == lookback else lookback + 1
-            cumulative_ok = (lookback <= 0 or self._has_continuous_history(i, required)) \
-                and self._cum_change_ok(i, direction)
-        else:
-            cumulative_ok = not sp.cum_change_enabled
-        trend_ok = direction is not None and single_ok and consecutive_ok and cumulative_ok
-
-        pattern_ok = not sp.shadow_body_enabled or (
-            direction is not None and self._shadow_body_ok(i, direction))
-        atr_ok = not sp.atr_enabled or (
-            self._has_continuous_history(i, sp.atr_period + 1)
-            and self._atr_ok(i))
-        volume_ok = not sp.volume_enabled or (
-            sp.volume_prev_n > 0
-            and self._has_continuous_history(i, sp.volume_prev_n + 1)
-            and self._volume_ok(i))
-        return trend_ok, pattern_ok, atr_ok, volume_ok
-
     @staticmethod
     def _fmt_metric(value: Optional[float], suffix: str = "") -> str:
         if value is None:
@@ -400,6 +362,24 @@ class BacktestEngine:
             f"{continuous}/2",
         )]
 
+        # 按 UI 第一行：成交量与前 N 根平均量倍数。
+        volume_metrics = self._volume_metrics(i)
+        _, volume_threshold = volume_metrics or (None, None)
+        volume_history = sp.volume_prev_n > 0 \
+            and self._has_continuous_history(i, sp.volume_prev_n + 1)
+        volume_ok = volume_history and volume_threshold is not None \
+            and self.klines[i].volume >= volume_threshold
+        volume_expr = (
+            f"{self.klines[i].volume:g} >= {self._fmt_metric(volume_threshold)}"
+        )
+        if not volume_history or volume_threshold is None:
+            volume_expr = self._history_short(continuous, sp.volume_prev_n + 1)
+        details.append(self._check_detail(
+            "check_volume", sp.volume_enabled, volume_ok,
+            volume_expr,
+        ))
+
+        # 按 UI 第二行起：单根涨跌、连续同向、累计幅度、ATR、影线比例。
         change = self._single_change_pct(i)
         direction = None if change is None or change == 0 \
             else (LONG if change > 0 else SHORT)
@@ -477,24 +457,9 @@ class BacktestEngine:
             f"{self._fmt_metric(shadow_ratio)} < {sp.shadow_body_upper:g}",
         ))
 
-        volume_metrics = self._volume_metrics(i)
-        _, volume_threshold = volume_metrics or (None, None)
-        volume_history = sp.volume_prev_n > 0 \
-            and self._has_continuous_history(i, sp.volume_prev_n + 1)
-        volume_ok = volume_history and volume_threshold is not None \
-            and self.klines[i].volume >= volume_threshold
-        volume_expr = (
-            f"{self.klines[i].volume:g} >= {self._fmt_metric(volume_threshold)}"
-        )
-        if not volume_history or volume_threshold is None:
-            volume_expr = self._history_short(continuous, sp.volume_prev_n + 1)
-        details.append(self._check_detail(
-            "check_volume", sp.volume_enabled, volume_ok,
-            volume_expr,
-        ))
         return " ; ".join(details)
 
-    def _log_kline(self, i: int, statuses: Tuple[bool, bool, bool, bool]):
+    def _log_kline(self, i: int):
         k = self.klines[i]
         try:
             raw_time = re.sub(
@@ -505,12 +470,9 @@ class BacktestEngine:
             time_text = timestamp.strftime("%Y-%m-%dT%H:%M:%S")
         except ValueError:
             time_text = str(k.open_time)
-        marks = tuple("✓" if value else "✗" for value in statuses)
         self._log(self._tr(
             "log_kline", index=k.index, time=time_text, close=f"{k.close:.2f}",
-            volume=f"{k.volume:g}", trend=marks[0], pattern=marks[1],
-            reversal=marks[2], volume_status=marks[3],
-            details=self._strategy_details(i),
+            volume=f"{k.volume:g}", details=self._strategy_details(i),
         ))
 
     # ---------------- 成交与平仓 ----------------
@@ -602,9 +564,7 @@ class BacktestEngine:
             can_scan = position is None and entry_signal is None \
                 and k.index > cooldown_until
             bar_signal = self._combined_signal(i) if can_scan else None
-            statuses = self._strategy_statuses(i) if can_scan \
-                else (False, False, False, False)
-            self._log_kline(i, statuses)
+            self._log_kline(i)
 
             # 14. 信号只在下一根连续K线开盘价成交；遇到数据缺口则取消。
             if entry_signal is not None and position is None:

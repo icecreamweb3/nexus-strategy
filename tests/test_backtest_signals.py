@@ -165,11 +165,10 @@ class SignalRuleTests(unittest.TestCase):
             ks, params(), OrderParams(),
             log=lambda message, triggered=False: messages.append(message),
         )
-        engine._log_kline(0, (False, False, False, False))
+        engine._log_kline(0)
         self.assertTrue(messages[0].startswith(
             "K线 #3 | 2026-02-27T08:02:00 | 收盘价: 67409.80 | "
-            "成交量:34.946 | 趋势策略: ✗ | 形态策略: ✗ | 反转策略: ✗ | "
-            "成交比策略: ✗ | 检测详情: "))
+            "成交量:34.946 | 参数检测: "))
         self.assertIn("K线连续性: ✗ [1/2]", messages[0])
         self.assertIn("单根涨跌幅: ✓ [未启用]", messages[0])
 
@@ -184,11 +183,10 @@ class SignalRuleTests(unittest.TestCase):
             log=lambda message, triggered=False: messages.append(message),
             translate=lambda key, **kwargs: i18n().tr_for(EN, key, **kwargs),
         )
-        engine._log_kline(0, (False, False, False, False))
+        engine._log_kline(0)
         self.assertTrue(messages[0].startswith(
             "K-line #3 | 2026-02-27T08:02:00 | Close: 67409.80 | "
-            "Volume:34.946 | Trend Strategy: ✗ | Pattern Strategy: ✗ | "
-            "Reversal Strategy: ✗ | Volume Ratio Strategy: ✗ | Check Details: "))
+            "Volume:34.946 | Parameter Checks: "))
         self.assertIn("K-line Continuity: ✗ [1/2]", messages[0])
         self.assertIn("Single Change: ✓ [Disabled]", messages[0])
 
@@ -213,7 +211,7 @@ class SignalRuleTests(unittest.TestCase):
             log=lambda message, triggered=False: messages.append(message),
         )
 
-        engine._log_kline(2, engine._strategy_statuses(2))
+        engine._log_kline(2)
 
         detail = messages[0]
         self.assertIn("K线连续性: ✓ [3/2]", detail)
@@ -223,6 +221,14 @@ class SignalRuleTests(unittest.TestCase):
         self.assertIn("ATR幅度: ✓ [2.9703% ∈ [2%, 4%]", detail)
         self.assertIn("逆势影线/实体比: ✓ [0.2 < 0.5", detail)
         self.assertIn("成交量倍数: ✓ [30 >= 22.5]", detail)
+        expected_order = (
+            "K线连续性", "成交量倍数", "单根涨跌幅", "信号方向",
+            "连续同向K线", "累计涨跌幅", "ATR幅度", "逆势影线/实体比",
+        )
+        self.assertEqual(
+            [detail.index(name) for name in expected_order],
+            sorted(detail.index(name) for name in expected_order),
+        )
 
     def test_kline_log_simplifies_missing_atr_history(self):
         messages = []
@@ -231,7 +237,7 @@ class SignalRuleTests(unittest.TestCase):
             log=lambda message, triggered=False: messages.append(message),
         )
 
-        engine._log_kline(0, engine._strategy_statuses(0))
+        engine._log_kline(0)
 
         self.assertIn("ATR幅度: ✗ [N/A (历史 1/15)]", messages[0])
 

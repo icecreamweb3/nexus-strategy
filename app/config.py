@@ -7,7 +7,17 @@ from dotenv import load_dotenv
 
 APP_DIR = os.path.dirname(sys.executable) if getattr(sys, "frozen", False) \
     else os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-load_dotenv(os.path.join(APP_DIR, ".env"))
+
+
+def _load_project_env() -> None:
+    """Load the project .env as the authoritative runtime configuration."""
+    # A desktop app is often launched from a shell/IDE that still contains old
+    # credentials.  The explicitly selected project .env must win over those
+    # inherited values, otherwise the UI can silently connect to another account.
+    load_dotenv(os.path.join(APP_DIR, ".env"), override=True)
+
+
+_load_project_env()
 
 
 _LANG_ALIASES = {
@@ -32,6 +42,9 @@ class Config:
 
 
 def load_config() -> Config:
+    # Reload on every connection/start action so edits to .env are picked up and
+    # stale process variables cannot become the credential source again.
+    _load_project_env()
     lang = os.getenv("UI_LANGUAGE", "zh_CN").strip().lower()
     return Config(
         api_key=os.getenv("BINANCE_API_KEY", ""),

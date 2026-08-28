@@ -20,7 +20,10 @@ from app.storage import TradingDatabase
 from app.ui.backtest_tab import BacktestTab
 
 
-SYMBOLS = ("BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT", "DOGEUSDT")
+SYMBOLS = (
+    "BTCUSDT", "BTCUSDC", "ETHUSDT", "BNBUSDT",
+    "SOLUSDT", "XRPUSDT", "DOGEUSDT",
+)
 INTERVALS = ("1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d")
 
 
@@ -39,10 +42,10 @@ class RealtimeStrategyTab(BacktestTab):
         self._live_log_path = ""
         self._db = TradingDatabase()
         super().__init__(parent)
-        self.cmb_symbol.currentIndexChanged.connect(self._restart_price_stream)
+        self.cmb_symbol.currentIndexChanged.connect(self._on_symbol_changed)
         if self.cmb_symbol.lineEdit() is not None:
             self.cmb_symbol.lineEdit().editingFinished.connect(
-                self._restart_price_stream)
+                self._on_symbol_changed)
         QTimer.singleShot(0, self._restart_price_stream)
         QTimer.singleShot(100, lambda: self._refresh_account(show_errors=False))
 
@@ -352,6 +355,11 @@ class RealtimeStrategyTab(BacktestTab):
         self.lbl_latest_value.setText(f"{symbol} PERP  —")
         stream.start()
 
+    def _on_symbol_changed(self, *_args):
+        self._restart_price_stream()
+        QTimer.singleShot(
+            0, lambda: self._refresh_account(show_errors=False))
+
     def _on_live_price(self, price: float):
         self._latest_close = price
         symbol = self.cmb_symbol.currentText().strip().upper()
@@ -370,8 +378,31 @@ class RealtimeStrategyTab(BacktestTab):
                 self._record_log(tr("realtime_position_exists", symbol=symbol), True)
                 return
             order = self._processor.order
-            amount = order.total_capital / order.split_count * order.leverage
-            quantity = amount / signal.kline.close
+            account = self._gateway.client.get_account_info()
+            if not account:
+                raise RuntimeError("Binance 账户接口未返回数据")
+            margin_asset, available_balance = self._available_margin_balance(
+                account, symbol)
+            reference_price = self._latest_close or signal.kline.close
+            target_notional = (
+                order.total_capital / order.split_count * order.leverage)
+            quantity = self._gateway.normalize_quantity(
+                symbol, target_notional / reference_price)
+            actual_notional = quantity * reference_price
+            estimated_margin = actual_notional / order.leverage
+            estimated_fee = actual_notional * order.fee_rate_pct / 100
+            safety_buffer = estimated_margin * 0.005
+            required_margin = estimated_margin + estimated_fee + safety_buffer
+            self._record_log(tr(
+                "realtime_order_margin_check", symbol=symbol,
+                quantity=f"{quantity:g}", notional=f"{actual_notional:.2f}",
+                required=f"{required_margin:.2f}", available=f"{available_balance:.2f}",
+                asset=margin_asset), True)
+            if available_balance < required_margin:
+                raise RuntimeError(tr(
+                    "realtime_margin_insufficient", symbol=symbol,
+                    required=f"{required_margin:.2f}",
+                    available=f"{available_balance:.2f}", asset=margin_asset))
             side = "BUY" if signal.direction == LONG else "SELL"
             position_mode = self._gateway.client.get_position_mode()
             position_side = signal.direction if position_mode is not False else None
@@ -402,22 +433,16 @@ class RealtimeStrategyTab(BacktestTab):
             account = client.get_account_info()
             if not account:
                 raise RuntimeError("Binance 账户接口未返回数据")
-            balance_value = account.get("availableBalance")
-            if balance_value in (None, ""):
-                usdt = next((
-                    asset for asset in account.get("assets", [])
-                    if str(asset.get("asset", "")).upper() == "USDT"
-                ), {})
-                balance_value = usdt.get(
-                    "availableBalance", usdt.get("walletBalance", 0))
-            balance = float(balance_value or 0)
+            symbol = self.cmb_symbol.currentText().strip().upper()
+            margin_asset, balance = self._available_margin_balance(
+                account, symbol)
             risk = self._account_risk_ratio(account)
             if risk is None:
                 risk = client.get_account_margin_ratio()
-            self.lbl_balance_value.setText(f"{balance:,.2f} USDT")
+            self.lbl_balance_value.setText(
+                f"{balance:,.2f} {margin_asset}")
             self.lbl_risk_value.setText(
                 f"{risk * 100:.2f}%" if risk is not None else "0.00%")
-            symbol = self.cmb_symbol.currentText().strip().upper()
             for remote_order in (
                 client.get_order_history(symbol) + client.get_open_orders(symbol)):
                 _, newly_filled = self._db.upsert_order(remote_order)
@@ -444,6 +469,27 @@ class RealtimeStrategyTab(BacktestTab):
         except (TypeError, ValueError):
             pass
         return None
+
+    @staticmethod
+    def _margin_asset_for_symbol(symbol: str) -> str:
+        symbol = symbol.upper()
+        for asset in ("USDT", "USDC", "FDUSD", "BUSD"):
+            if symbol.endswith(asset):
+                return asset
+        return "USDT"
+
+    @classmethod
+    def _available_margin_balance(cls, account: dict, symbol: str):
+        """返回所选合约可实际使用的保证金币种与余额。"""
+        asset_name = cls._margin_asset_for_symbol(symbol)
+        multi_assets = account.get("multiAssetsMargin", False)
+        if multi_assets is True or str(multi_assets).lower() == "true":
+            return asset_name, float(account.get("availableBalance", 0) or 0)
+        asset = next((
+            row for row in account.get("assets", [])
+            if str(row.get("asset", "")).upper() == asset_name
+        ), {})
+        return asset_name, float(asset.get("availableBalance", 0) or 0)
 
     def _insert_order(self, order: dict, symbol: str, side: str):
         order_id = order.get("orderId")

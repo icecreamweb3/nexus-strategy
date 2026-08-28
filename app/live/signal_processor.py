@@ -78,8 +78,7 @@ class LiveSignalProcessor:
         engine = BacktestEngine(
             self.klines, self.strategy, self.order, log=self.log,
             translate=self.translate)
-        statuses = engine._strategy_statuses(index)
-        engine._log_kline(index, statuses)
+        engine._log_kline(index)
         direction = engine._combined_signal(index)
         if direction is None:
             return None

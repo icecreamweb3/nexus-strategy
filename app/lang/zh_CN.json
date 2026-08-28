@@ -20,6 +20,8 @@
   "realtime_position_exists": "{symbol} 已有持仓，跳过本次开仓信号",
   "realtime_order_sent": "已发送 {side} 市价单：{symbol}，数量 {quantity}（信号K线 #{kline}）",
   "realtime_order_failed": "实盘下单失败：{err}",
+  "realtime_order_margin_check": "下单保证金检查：{symbol} 数量 {quantity}，名义价值 {notional}，预计需要 {required} {asset}，可用 {available} {asset}",
+  "realtime_margin_insufficient": "{symbol} 可用保证金不足：预计需要 {required} {asset}，当前可用 {available} {asset}",
   "live_trading_panel": "实盘交易",
   "live_refresh": "刷新",
   "live_balance_short": "余额：",
@@ -133,7 +135,7 @@
   "err_no_data": "请先导入历史数据文件",
   "err_load_file": "文件加载失败：{err}",
 
-  "log_kline": "K线 #{index} | {time} | 收盘价: {close} | 成交量:{volume} | 趋势策略: {trend} | 形态策略: {pattern} | 反转策略: {reversal} | 成交比策略: {volume_status} | 检测详情: {details}",
+  "log_kline": "K线 #{index} | {time} | 收盘价: {close} | 成交量:{volume} | 参数检测: {details}",
   "log_check_detail": "{name}: {mark} [{expression}]",
   "log_check_disabled": "{name}: ✓ [未启用]",
   "check_continuity": "K线连续性",
