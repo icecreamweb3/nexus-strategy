@@ -28,7 +28,9 @@ class BinanceLiveGateway:
         rows = self.client.get_kline_data(
             symbol=symbol.upper(), interval=interval,
             limit=min(max(limit, 2), 1500))
-        now_ms = int(time.time() * 1000)
+        server_time = self.client.get_server_time()
+        now_ms = int(server_time.timestamp() * 1000) \
+            if server_time is not None else int(time.time() * 1000)
         closed = [row for row in rows if int(row[6]) < now_ms]
         return [self.kline_from_rest(row, index + 1)
                 for index, row in enumerate(closed)]

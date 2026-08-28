@@ -126,6 +126,10 @@ class OrdersMonitor:
         self._kline_ws = None
         self._kline_ws_thread = None
         self._kline_reconnect_count = 0
+        self._kline_state_lock = threading.Lock()
+        self._closed_kline_keys = set()
+        self._kline_close_timers = []
+        self._warned_non_boolean_kline_x = False
 
         # 实时价格订阅
         self.price_symbol = symbol.lower() if symbol else None
@@ -600,17 +604,85 @@ class OrdersMonitor:
         if self._kline_ws_thread:
             self._kline_ws_thread.join(timeout=2)
             self._kline_ws_thread = None
+        with self._kline_state_lock:
+            timers = self._kline_close_timers
+            self._kline_close_timers = []
+        for timer in timers:
+            timer.cancel()
+
+    def _emit_closed_kline(self, kline: dict, received_at: int,
+                           require_running: bool = False) -> None:
+        if require_running and not self.running:
+            return
+        logger.info(
+            "K线收盘确认: received_at=%d, processed_at=%d, t=%s, T=%s, E=%s, x=%r",
+            received_at, int(time.time() * 1000), kline.get('t'), kline.get('T'),
+            kline.get('_event_time'), kline.get('x'))
+        if self.on_kline_closed:
+            self.on_kline_closed(kline)
+
+    def _delayed_emit_closed_kline(self, kline: dict, received_at: int) -> None:
+        try:
+            self._emit_closed_kline(kline, received_at, require_running=True)
+        finally:
+            current = threading.current_thread()
+            with self._kline_state_lock:
+                self._kline_close_timers = [
+                    timer for timer in self._kline_close_timers
+                    if timer is not current]
 
     def _on_kline_message(self, ws, message) -> None:
-        """只把 Binance 标记为已收盘（x=true）的 K 线交给策略层。"""
+        """经过关闭状态、事件时间和本机时间三重确认后提交 K 线。"""
         try:
+            received_at = int(time.time() * 1000)
             data = json.loads(message)
             data = data.get('data', data)
             kline = data.get('k', {})
-            if data.get('e') != 'kline' or not kline.get('x'):
+            if data.get('e') != 'kline':
                 return
-            if self.on_kline_closed:
-                self.on_kline_closed(kline)
+            closed = kline.get('x')
+            if closed is not True:
+                if closed not in (False, None) and not self._warned_non_boolean_kline_x:
+                    self._warned_non_boolean_kline_x = True
+                    logger.warning("忽略非布尔 K 线关闭标记: x=%r", closed)
+                return
+            event_time = int(data.get('E', 0) or 0)
+            close_time = int(kline.get('T', 0) or 0)
+            open_time = int(kline.get('t', 0) or 0)
+            if not event_time or not close_time or not open_time:
+                logger.warning("忽略缺少 t/T/E 的已收盘 K 线")
+                return
+            if event_time < close_time:
+                logger.warning(
+                    "忽略结束时间之前的 K 线事件: t=%d, T=%d, E=%d, x=%r",
+                    open_time, close_time, event_time, closed)
+                return
+
+            key = (str(kline.get('s', self.kline_symbol)),
+                   str(kline.get('i', self.kline_interval)), open_time)
+            with self._kline_state_lock:
+                if key in self._closed_kline_keys:
+                    return
+                self._closed_kline_keys.add(key)
+                if len(self._closed_kline_keys) > 2048:
+                    self._closed_kline_keys = {key}
+
+            checked_kline = copy.deepcopy(kline)
+            checked_kline['_event_time'] = event_time
+            delay_seconds = max(0.0, (close_time + 1 - received_at) / 1000.0)
+            if delay_seconds > 0:
+                timer = threading.Timer(
+                    delay_seconds, self._delayed_emit_closed_kline,
+                    args=(checked_kline, received_at))
+                timer.daemon = True
+                with self._kline_state_lock:
+                    self._kline_close_timers.append(timer)
+                logger.info(
+                    "K线最终事件早于本机收盘边界，延迟 %.3fs: t=%d, T=%d, E=%d",
+                    delay_seconds, open_time, close_time, event_time)
+                timer.start()
+                return
+            self._emit_closed_kline(checked_kline, received_at)
         except Exception as exc:
             logger.warning(f"K线消息解析异常: {exc}")
 

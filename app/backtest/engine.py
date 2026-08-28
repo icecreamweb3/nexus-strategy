@@ -5,6 +5,7 @@
 from dataclasses import dataclass
 from collections import Counter
 from datetime import datetime
+import re
 from typing import Callable, List, Optional, Tuple
 
 from app.backtest.data_loader import Kline
@@ -496,9 +497,12 @@ class BacktestEngine:
     def _log_kline(self, i: int, statuses: Tuple[bool, bool, bool, bool]):
         k = self.klines[i]
         try:
+            raw_time = re.sub(
+                r"(T\d{2}:\d{2}:\d{2})\.\d+", r"\1",
+                str(k.open_time).strip())
             timestamp = datetime.fromisoformat(
-                str(k.open_time).strip().replace("Z", "+00:00"))
-            time_text = timestamp.strftime("%Y-%m-%dT%H:%M:%S.%f") + "000"
+                raw_time.replace("Z", "+00:00"))
+            time_text = timestamp.strftime("%Y-%m-%dT%H:%M:%S")
         except ValueError:
             time_text = str(k.open_time)
         marks = tuple("✓" if value else "✗" for value in statuses)

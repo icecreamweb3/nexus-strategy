@@ -167,7 +167,7 @@ class SignalRuleTests(unittest.TestCase):
         )
         engine._log_kline(0, (False, False, False, False))
         self.assertTrue(messages[0].startswith(
-            "K线 #3 | 2026-02-27T08:02:00.000000000 | 收盘价: 67409.80 | "
+            "K线 #3 | 2026-02-27T08:02:00 | 收盘价: 67409.80 | "
             "成交量:34.946 | 趋势策略: ✗ | 形态策略: ✗ | 反转策略: ✗ | "
             "成交比策略: ✗ | 检测详情: "))
         self.assertIn("K线连续性: ✗ [1/2]", messages[0])
@@ -186,7 +186,7 @@ class SignalRuleTests(unittest.TestCase):
         )
         engine._log_kline(0, (False, False, False, False))
         self.assertTrue(messages[0].startswith(
-            "K-line #3 | 2026-02-27T08:02:00.000000000 | Close: 67409.80 | "
+            "K-line #3 | 2026-02-27T08:02:00 | Close: 67409.80 | "
             "Volume:34.946 | Trend Strategy: ✗ | Pattern Strategy: ✗ | "
             "Reversal Strategy: ✗ | Volume Ratio Strategy: ✗ | Check Details: "))
         self.assertIn("K-line Continuity: ✗ [1/2]", messages[0])

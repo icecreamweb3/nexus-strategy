@@ -57,6 +57,7 @@ Windows EXE 需要在 Windows 上构建。程序启动后会在 EXE 所在目录
 应用日志写入 `logs/trade.log`（RotatingFileHandler，单文件 5MB × 5 份）。每次点击 Start Trading 会另外生成 `logs/trader_live_时间戳.log`，记录该次实盘会话的策略检测和下单日志。
 
 订单、成交和持仓数据写入 `data/nexus_strategy.sqlite3`，首次启动时自动创建表和索引。
+完整 SQLite DDL 位于 `docs/trading_schema.sql`。
 
 ## 目录结构
 
