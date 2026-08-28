@@ -1,26 +1,30 @@
 """实盘交易页 / Live trading tab — REST 下单 + WebSocket 监听订单状态."""
 from datetime import datetime
 
+from PyQt5.QtCore import pyqtSignal
 from PyQt5.QtWidgets import (
     QComboBox, QDoubleSpinBox, QGridLayout, QGroupBox, QHBoxLayout, QHeaderView,
     QLabel, QMessageBox, QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout,
     QWidget,
 )
 
-from app.api.client import BinanceFuturesClient
-from app.api.ws_listener import OrderStreamListener
+from app.client.binance_client import BinanceClient
+from app.client.binance_websocket import OrdersMonitor
 from app.config import load_config
 from app.i18n import tr
 from app.logger import get_logger
 
 
 class LiveTab(QWidget):
+    order_event = pyqtSignal(dict)
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self._client = None
         self._listener = None
         self._retr = []
         self._order_rows = {}   # order_id -> row
+        self.order_event.connect(self._on_order_update)
         self._build_ui()
         self.retranslate()
 
@@ -141,12 +145,14 @@ class LiveTab(QWidget):
             QMessageBox.warning(self, tr("app_title"), tr("live_no_credentials"))
             return
         try:
-            self._client = BinanceFuturesClient(cfg)
-            self._listener = OrderStreamListener(self._client, self)
-            self._listener.order_update.connect(self._on_order_update)
-            self._listener.stream_started.connect(
-                lambda: get_logger().info(tr("live_ws_started")))
+            self._client = BinanceClient(
+                api_key=cfg.api_key, secret_key=cfg.api_secret,
+                testnet=cfg.testnet)
+            self._listener = OrdersMonitor(
+                self._client, on_order_update=self.order_event.emit,
+                testnet=cfg.testnet)
             self._listener.start()
+            get_logger().info(tr("live_ws_started"))
             self.btn_refresh.setEnabled(True)
             self.btn_place.setEnabled(True)
             self._refresh_balance()
@@ -158,7 +164,7 @@ class LiveTab(QWidget):
         if self._client is None:
             return
         try:
-            balance = self._client.get_balance()
+            balance = self._client.get_account_balance()
             self.lbl_balance_val.setText(f"{balance:,.2f}")
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, tr("app_title"), tr("live_error", err=exc))
@@ -172,11 +178,20 @@ class LiveTab(QWidget):
         side = "BUY" if self.cmb_side.currentIndex() == 0 else "SELL"
         order_type = "MARKET" if self.cmb_type.currentIndex() == 0 else "LIMIT"
         try:
-            self._client.place_order(
-                symbol=symbol, side=side, quantity=self.sp_qty.value(),
-                order_type=order_type,
-                price=self.sp_price.value() if order_type == "LIMIT" else None,
-            )
+            position_mode = self._client.get_position_mode()
+            position_side = ("LONG" if side == "BUY" else "SHORT") \
+                if position_mode is not False else None
+            if order_type == "MARKET":
+                result = self._client.place_market_order(
+                    symbol=symbol, side=side, quantity=self.sp_qty.value(),
+                    position_side=position_side)
+            else:
+                result = self._client.place_limit_order(
+                    symbol=symbol, side=side, quantity=self.sp_qty.value(),
+                    price=self.sp_price.value(), position_side=position_side)
+            if not result or result.get("error"):
+                raise RuntimeError(
+                    (result or {}).get("error_message", "Binance 下单失败"))
         except Exception as exc:  # noqa: BLE001
             QMessageBox.warning(self, tr("app_title"), tr("live_error", err=exc))
 

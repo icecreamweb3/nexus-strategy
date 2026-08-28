@@ -39,7 +39,7 @@ class StrategyParams:
 
 @dataclass
 class OrderParams:
-    total_capital: float = 10000.0       # 初始总资金（USDT）
+    total_capital: float = 100.0         # 初始总资金（USDT）
     split_count: int = 1                 # 总资金拆分份数
     leverage: float = 1.0                # 杠杆倍数（原 Order Rate）
     fee_rate_pct: float = 0.03

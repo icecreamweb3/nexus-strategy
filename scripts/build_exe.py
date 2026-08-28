@@ -17,6 +17,8 @@ REQUIRED_MODULES = {
     "PyQt5": "PyQt5",
     "dotenv": "python-dotenv",
     "openpyxl": "openpyxl",
+    "binance": "python-binance",
+    "websocket": "websocket-client",
 }
 
 
@@ -69,9 +71,13 @@ def main() -> int:
         "--collect-all", "PyQt5",
         "--collect-all", "openpyxl",
         "--collect-all", "dotenv",
+        "--collect-all", "binance",
+        "--collect-all", "websocket",
         "--copy-metadata", "PyQt5",
         "--copy-metadata", "openpyxl",
         "--copy-metadata", "python-dotenv",
+        "--copy-metadata", "python-binance",
+        "--copy-metadata", "websocket-client",
         "--hidden-import", "openpyxl",
         "--hidden-import", "openpyxl.cell._writer",
         "--hidden-import", "openpyxl.styles",

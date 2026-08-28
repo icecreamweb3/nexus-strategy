@@ -48,3 +48,10 @@ def create_backtest_log_path(now: datetime = None) -> str:
     os.makedirs(LOG_DIR, exist_ok=True)
     timestamp = (now or datetime.now()).strftime("%Y%m%d_%H%M%S_%f")
     return os.path.join(LOG_DIR, f"backtest_{timestamp}.log")
+
+
+def create_trader_live_log_path(now: datetime = None) -> str:
+    """为单次实盘交易会话创建带本地时间戳的独立日志路径。"""
+    os.makedirs(LOG_DIR, exist_ok=True)
+    timestamp = (now or datetime.now()).strftime("%Y%m%d_%H%M%S_%f")
+    return os.path.join(LOG_DIR, f"trader_live_{timestamp}.log")

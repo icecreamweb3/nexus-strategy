@@ -127,25 +127,33 @@ class BacktestTab(QWidget):
         return box
 
     def _build_params_section(self) -> QWidget:
-        wrap = QWidget()
-        lay = QHBoxLayout(wrap)
-        lay.setContentsMargins(0, 0, 0, 0)
+        # 策略条件与订单参数属于同一个参数设置 Group，内部横向分隔。
+        wrap = QGroupBox()
+        self._reg(wrap.setTitle, "sec_params")
+        lay = QVBoxLayout(wrap)
 
         # ---- 左：策略参数 ----
         strat_box = QGroupBox()
         self._reg(strat_box.setTitle, "sec_strategy")
+        strat_box.setFlat(True)
         grid = QGridLayout(strat_box)
 
+        self.btn_reset_params = QPushButton()
+        self._reg(self.btn_reset_params.setText, "reset_params")
+        self.btn_reset_params.clicked.connect(self._reset_params)
         self.btn_export_params = QPushButton()
         self._reg(self.btn_export_params.setText, "export_params")
         self.btn_export_params.clicked.connect(self._export_params)
         self.btn_import_params = QPushButton()
         self._reg(self.btn_import_params.setText, "import_params")
         self.btn_import_params.clicked.connect(self._import_params)
-        grid.addWidget(self.btn_export_params, 0, 0, 1, 2)
-        grid.addWidget(self.btn_import_params, 0, 2, 1, 2)
+        toolbar = QHBoxLayout()
+        toolbar.addStretch(1)
+        toolbar.addWidget(self.btn_reset_params)
+        toolbar.addWidget(self.btn_import_params)
+        toolbar.addWidget(self.btn_export_params)
 
-        r = 1
+        r = 0
         # 每个条件一个勾选框；全部勾选条件满足才确认信号
         # 成交量：当前K线成交量 >= 前N根均量 × 阈值
         self.chk_volume = QCheckBox()
@@ -257,12 +265,13 @@ class BacktestTab(QWidget):
         grid.addWidget(sh_row, r, 0, 1, 4)
         r += 1
 
-        # ---- 右：开单参数 ----
+        # ---- 右：订单参数 ----
         order_box = QGroupBox()
         self._reg(order_box.setTitle, "sec_order_params")
+        order_box.setFlat(True)
         ogrid = QGridLayout(order_box)
 
-        self.sp_total_capital = _dspin(10000.0)
+        self.sp_total_capital = _dspin(100.0)
         self.sp_split_count = _ispin(1, maximum=100000, minimum=1)
         self.sp_leverage = _dspin(1.0, maximum=1000.0, decimals=4)
         self.sp_fee = _dspin(0.03, decimals=4)
@@ -317,11 +326,14 @@ class BacktestTab(QWidget):
         ogrid.addWidget(self.sp_add_count, row, 5)
         row += 1
 
-        # 宽度固定 60% / 40%：Ignored 策略忽略内容 sizeHint，严格按 stretch 分配
         strat_box.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         order_box.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
-        lay.addWidget(strat_box, stretch=6)
-        lay.addWidget(order_box, stretch=4)
+        sections = QHBoxLayout()
+        sections.setContentsMargins(0, 0, 0, 0)
+        sections.addWidget(strat_box, stretch=6)
+        sections.addWidget(order_box, stretch=4)
+        lay.addLayout(toolbar)
+        lay.addLayout(sections)
         return wrap
 
     def _build_results_section(self) -> QGroupBox:
@@ -463,6 +475,42 @@ class BacktestTab(QWidget):
         get_logger().info("加载K线数据 %s (%d 条)", path, len(self.klines))
 
     # ---------- 参数收集 ----------
+
+    def _reset_params(self):
+        """恢复 StrategyParams / OrderParams 的界面默认值。"""
+        sp = StrategyParams()
+        op = OrderParams()
+        self.chk_volume.setChecked(sp.volume_enabled)
+        self.sp_volume_prev_n.setValue(sp.volume_prev_n)
+        self.sp_volume_mult.setValue(sp.volume_mult)
+        self.chk_single.setChecked(sp.single_change_enabled)
+        self.sp_single_pct.setValue(sp.single_change_pct)
+        self.sp_single_max_pct.setValue(sp.single_change_max_pct)
+        self.chk_consec.setChecked(sp.consecutive_enabled)
+        self.sp_consec_count.setValue(sp.consecutive_count)
+        self.chk_cum.setChecked(sp.cum_change_enabled)
+        self.sp_cum_klines.setValue(sp.cum_klines)
+        self.sp_cum_pct.setValue(sp.cum_change_pct)
+        self.chk_atr.setChecked(sp.atr_enabled)
+        self.sp_atr_period.setValue(sp.atr_period)
+        self.sp_atr_min.setValue(sp.atr_min_pct)
+        self.sp_atr_max.setValue(sp.atr_max_pct)
+        self.chk_shadow.setChecked(sp.shadow_body_enabled)
+        self.sp_shadow_upper.setValue(sp.shadow_body_upper)
+        self.sp_shadow_lower.setValue(sp.shadow_body_lower)
+        self.sp_total_capital.setValue(op.total_capital)
+        self.sp_split_count.setValue(op.split_count)
+        self.sp_leverage.setValue(op.leverage)
+        self.sp_fee.setValue(op.fee_rate_pct)
+        self.sp_stop_loss.setValue(op.stop_loss)
+        self.sp_cooldown.setValue(op.stop_cooldown)
+        self.sp_take_profit.setValue(op.take_profit)
+        self.cmb_direction.setCurrentIndex(
+            ("BOTH", "LONG", "SHORT").index(op.direction))
+        self.sp_add_interval.setValue(op.add_interval_pct)
+        self.sp_add_mult.setValue(op.add_mult)
+        self.sp_add_count.setValue(op.add_count)
+        self.sp_max_hold.setValue(op.max_hold_klines)
 
     def _collect_params(self):
         sp = StrategyParams(

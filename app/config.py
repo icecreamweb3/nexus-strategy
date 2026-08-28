@@ -27,7 +27,8 @@ class Config:
     @property
     def has_credentials(self) -> bool:
         return bool(self.api_key) and bool(self.api_secret) \
-            and self.api_key != "your_api_key_here"
+            and self.api_key != "your_api_key_here" \
+            and self.api_secret != "your_api_secret_here"
 
 
 def load_config() -> Config:

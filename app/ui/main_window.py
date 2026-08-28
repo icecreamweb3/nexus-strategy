@@ -2,7 +2,7 @@
 from PyQt5.QtWidgets import QAction, QMainWindow, QTabWidget
 
 from app.i18n import EN, ZH, i18n, tr
-from app.ui.backtest_tab import BacktestTab
+from app.ui.realtime_tab import RealtimeStrategyTab
 
 
 class MainWindow(QMainWindow):
@@ -11,7 +11,7 @@ class MainWindow(QMainWindow):
         self.resize(1536, 1032)
 
         self.tabs = QTabWidget()
-        self.backtest_tab = BacktestTab()
+        self.backtest_tab = RealtimeStrategyTab()
         self.tabs.addTab(self.backtest_tab, "")
         self.setCentralWidget(self.tabs)
 
@@ -31,9 +31,13 @@ class MainWindow(QMainWindow):
 
     def retranslate(self, *_args):
         self.setWindowTitle(tr("app_title"))
-        self.tabs.setTabText(0, tr("tab_backtest"))
+        self.tabs.setTabText(0, tr("tab_realtime"))
         self.menu_lang.setTitle(tr("menu_language"))
         self.action_zh.setText(tr("lang_zh"))
         self.action_en.setText(tr("lang_en"))
         self.backtest_tab.retranslate()
         self.statusBar().showMessage(tr("version_info"))
+
+    def closeEvent(self, event):
+        self.backtest_tab.close_listener()
+        super().closeEvent(event)
