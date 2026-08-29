@@ -23,6 +23,11 @@ def params(**overrides):
 
 
 class SignalRuleTests(unittest.TestCase):
+    def test_default_absolute_close_change_is_greater_than_point_zero_zero_four(self):
+        strategy = StrategyParams()
+
+        self.assertEqual(strategy.single_change_pct, 0.004)
+
     def test_volume_uses_previous_average_and_accepts_equal_threshold(self):
         ks = [kline(1, volume=10), kline(2, volume=20), kline(3, volume=15)]
         engine = BacktestEngine(ks, params(volume_prev_n=2, volume_mult=1), OrderParams())
@@ -239,7 +244,48 @@ class SignalRuleTests(unittest.TestCase):
 
         engine._log_kline(0)
 
-        self.assertIn("ATR幅度: ✗ [N/A (历史 1/15)]", messages[0])
+        self.assertIn(
+            "ATR幅度: ✗ [N/A ∈ [0%, 100%] (历史 1/15)]",
+            messages[0],
+        )
+
+    def test_kline_log_keeps_values_when_continuous_history_is_short(self):
+        messages = []
+        ks = [
+            kline(i + 1, open_=100, high=101, low=99, close=100)
+            for i in range(15)
+        ]
+        for i, item in enumerate(ks):
+            item.open_time = str(i * 60)
+        # Leave a gap before the final two candles, so only 2 are continuous.
+        ks[-2].open_time = "900"
+        ks[-1].open_time = "960"
+        ks[-1].close = 101
+        engine = BacktestEngine(
+            ks,
+            params(
+                cum_change_enabled=True,
+                cum_klines=3,
+                cum_change_pct=3,
+                atr_enabled=True,
+                atr_period=14,
+                atr_min_pct=1,
+                atr_max_pct=3,
+            ),
+            OrderParams(),
+            log=lambda message, triggered=False: messages.append(message),
+        )
+
+        engine._log_kline(14)
+
+        self.assertIn(
+            "累计涨跌幅: ✗ [1% < 3% (历史 2/4)]",
+            messages[0],
+        )
+        self.assertIn(
+            "ATR幅度: ✗ [2% ∈ [1%, 3%] (历史 2/15)]",
+            messages[0],
+        )
 
 
 if __name__ == "__main__":

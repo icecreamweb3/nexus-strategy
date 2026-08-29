@@ -1,7 +1,9 @@
 import json
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
+from app.client.binance_client import BinanceClient
 from app.client.binance_websocket import OrdersMonitor
 
 
@@ -89,6 +91,84 @@ class BinanceWebsocketTests(unittest.TestCase):
         self.assertTrue(monitor.running)
         self.assertEqual(started, [True])
         monitor.stop()
+
+    def test_start_reports_listen_key_failure_detail(self):
+        client = SimpleNamespace(
+            last_user_data_stream_error="ConnectTimeout: proxy unavailable",
+            start_user_data_stream=lambda: None,
+        )
+        monitor = OrdersMonitor(client)
+
+        monitor.start()
+
+        self.assertFalse(monitor.running)
+        self.assertIn("proxy unavailable", monitor.last_start_error)
+
+    def test_filled_market_order_submits_percentage_tp_and_sl(self):
+        class Client:
+            def place_stop_loss_order(self, **kwargs):
+                self.stop_loss = kwargs
+                return {"algoId": 501, "clientAlgoId": "sl-501"}
+
+            def place_take_profit_order(self, **kwargs):
+                self.take_profit = kwargs
+                return {"algoId": 502, "clientAlgoId": "tp-502"}
+
+        client = Client()
+        completed = []
+        monitor = OrdersMonitor(
+            client, on_order_filled_callback=completed.append)
+        monitor._handle_order_update({
+            "i": 42, "X": "FILLED", "x": "TRADE", "z": "0.01",
+            "ap": "100", "o": "MARKET", "ps": "BOTH",
+        })
+
+        monitor.add_order_to_monitor("42", {"symbol": "BTCUSDT"}, {
+            "symbol": "BTCUSDT", "signal_type": "LONG",
+            "stop_loss": {
+                "price_param": 1, "price_type": "百分比",
+                "side": "SELL", "position_side": "LONG",
+            },
+            "take_profit": {
+                "price_param": 2, "price_type": "百分比",
+                "side": "SELL", "position_side": "LONG",
+            },
+        })
+
+        self.assertEqual(client.stop_loss["stop_price"], 99)
+        self.assertEqual(client.take_profit["price"], 102)
+        self.assertEqual(completed[0]["stop_loss_order_id"], 501)
+        self.assertEqual(completed[0]["take_profit_order_id"], 502)
+        self.assertEqual(completed[0]["stop_loss_price"], 99)
+        self.assertEqual(completed[0]["take_profit_price"], 102)
+
+    @patch("app.client.binance_client.time.sleep")
+    @patch("requests.post")
+    def test_listen_key_retries_transient_network_error(self, post, _sleep):
+        import requests
+
+        post.side_effect = [
+            requests.ConnectTimeout("temporary"),
+            SimpleNamespace(
+                status_code=200,
+                json=lambda: {"listenKey": "abc"},
+                text="",
+            ),
+        ]
+        client = SimpleNamespace(
+            base_url="https://example.test",
+            default_headers={},
+            proxy_config=None,
+            CONNECT_TIMEOUT=5,
+            READ_TIMEOUT=10,
+            MAX_RETRIES=2,
+            last_user_data_stream_error=None,
+        )
+
+        result = BinanceClient.start_user_data_stream(client)
+
+        self.assertEqual(result, "abc")
+        self.assertEqual(post.call_count, 2)
 
 
 if __name__ == "__main__":

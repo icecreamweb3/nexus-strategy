@@ -15,6 +15,26 @@ LONG = "LONG"
 SHORT = "SHORT"
 
 
+def base_order_notional(capital: float, split_count: int) -> float:
+    """按资金和拆分份数计算名义下单金额；杠杆不改变下单金额。"""
+    if split_count <= 0 or capital <= 0:
+        return 0.0
+    return capital / split_count
+
+
+def required_order_margin(notional: float, leverage: float,
+                          fee_rate_pct: float,
+                          safety_buffer_rate: float = 0.005) -> float:
+    """估算初始保证金、开仓手续费与安全缓冲的合计需求。"""
+    if notional <= 0:
+        return 0.0
+    effective_leverage = max(1.0, float(leverage))
+    initial_margin = notional / effective_leverage
+    estimated_fee = notional * max(0.0, fee_rate_pct) / 100
+    safety_buffer = initial_margin * max(0.0, safety_buffer_rate)
+    return initial_margin + estimated_fee + safety_buffer
+
+
 @dataclass
 class StrategyParams:
     volume_enabled: bool = True
@@ -22,7 +42,7 @@ class StrategyParams:
     volume_op: str = ">="              # 旧参数文件兼容；策略固定使用 >=
     volume_mult: float = 0.6           # 阈值（均量 × 倍数）
     single_change_enabled: bool = True
-    single_change_pct: float = 0.04    # 单根绝对涨跌幅下限(%)，即 C
+    single_change_pct: float = 0.004   # 单根绝对涨跌幅下限(%)，即 C
     single_change_max_pct: float = 100.0  # 单根绝对涨跌幅上限(%)，即 D
     consecutive_enabled: bool = True
     consecutive_count: int = 2         # 0/1 忽略，>=2 时检查（含信号K线）
@@ -42,7 +62,7 @@ class StrategyParams:
 class OrderParams:
     total_capital: float = 100.0         # 初始总资金（USDT）
     split_count: int = 1                 # 总资金拆分份数
-    leverage: float = 1.0                # 杠杆倍数（原 Order Rate）
+    leverage: float = 100.0              # 杠杆倍数（原 Order Rate）
     fee_rate_pct: float = 0.03
     stop_loss: float = 1.0              # 相对持仓均价的止损百分比；0 表示关闭
     stop_cooldown: int = 10             # K线数
@@ -428,7 +448,9 @@ class BacktestEngine:
             f"{self._fmt_metric(cumulative, '%')} < {sp.cum_change_pct:g}%"
         )
         if lookback > 0 and not self._has_continuous_history(i, required):
-            cumulative_expr = self._history_short(continuous, required)
+            # Keep the computed value and configured threshold visible.  The
+            # history note explains why the check still cannot pass.
+            cumulative_expr += f" ({self._history_short(continuous, required)})"
         details.append(self._check_detail(
             "check_cumulative", sp.cum_change_enabled, cumulative_ok,
             cumulative_expr,
@@ -442,8 +464,13 @@ class BacktestEngine:
             f"{self._fmt_metric(atr, '%')} ∈ "
             f"[{sp.atr_min_pct:g}%, {sp.atr_max_pct:g}%]"
         )
-        if not atr_history or atr is None:
-            atr_expr = f"N/A ({self._history_short(continuous, sp.atr_period + 1)})"
+        if not atr_history:
+            # ATR may be numerically available across a data gap.  Show it for
+            # diagnostics, while atr_history keeps the result failed and avoids
+            # trading on discontinuous candles.
+            atr_expr += (
+                f" ({self._history_short(continuous, sp.atr_period + 1)})"
+            )
         details.append(self._check_detail(
             "check_atr", sp.atr_enabled, atr_ok,
             atr_expr,
@@ -478,10 +505,8 @@ class BacktestEngine:
     # ---------------- 成交与平仓 ----------------
 
     def _base_order_amount(self) -> float:
-        """按最新总资金、拆分份数和杠杆计算本次名义下单金额。"""
-        if self.op.split_count <= 0 or self.current_capital <= 0:
-            return 0.0
-        return self.current_capital / self.op.split_count * self.op.leverage
+        """按最新总资金和拆分份数计算本次名义下单金额。"""
+        return base_order_notional(self.current_capital, self.op.split_count)
 
     def _new_position(self, side: str, entry_kline: int, price: float) -> _Position:
         initial_amount = self._base_order_amount()

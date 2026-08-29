@@ -168,6 +168,7 @@ class OrdersMonitor:
         self.listen_key = None
         self.keepalive_thread = None
         self.health_check_thread = None  # ✅ 添加健康检查线程
+        self.last_start_error = None
         self.keepalive_interval = 30 * 60  # 30分钟（Binance要求60分钟内至少keepalive一次）
         
         # 代理配置（从环境变量PROXY读取）
@@ -401,9 +402,15 @@ class OrdersMonitor:
             return
         
         # 获取listenKey
+        self.last_start_error = None
         self.listen_key = self.binance_client.start_user_data_stream()
         if not self.listen_key:
-            logger.error("❌ 无法获取User Data Stream listenKey")
+            detail = getattr(
+                self.binance_client, 'last_user_data_stream_error', None)
+            self.last_start_error = "无法获取 User Data Stream listenKey"
+            if detail:
+                self.last_start_error += f": {detail}"
+            logger.error("❌ %s", self.last_start_error)
             return
         
         logger.info(f"✅ 获取listenKey成功: {self.listen_key[:20]}...")
@@ -912,6 +919,20 @@ class OrdersMonitor:
             trigger_price = float(algo_order_data.get('tp', 0))  # 触发价格
             actual_price = float(algo_order_data.get('ap', 0))  # 实际成交价格（如果已触发）
             actual_order_id = algo_order_data.get('ai', '')  # 实际订单ID（如果已触发）
+
+            if self.on_order_update_callback and algo_id:
+                try:
+                    self.on_order_update_callback({
+                        'i': algo_id, 'aid': algo_id, 'caid': client_algo_id,
+                        's': symbol, 'S': algo_order_data.get('S', ''),
+                        'ps': algo_order_data.get('ps', 'BOTH'),
+                        'o': order_type, 'q': str(quantity),
+                        'p': str(trigger_price), 'sp': str(trigger_price),
+                        'ap': str(actual_price), 'X': algo_status,
+                        'x': 'ALGO_UPDATE',
+                    })
+                except Exception as exc:
+                    logger.warning(f"算法订单状态回调异常: {exc}")
             
             logger.debug(f"📋 收到算法订单更新: algo_id={algo_id}, client_algo_id={client_algo_id}, status={algo_status}, order_type={order_type}, symbol={symbol}")
             
@@ -1266,6 +1287,9 @@ class OrdersMonitor:
             if stop_loss_result is not None and not stop_loss_result.get('error'):
                 stop_loss_order_id = stop_loss_result.get('algoId')
                 client_algo_id = stop_loss_result.get('clientAlgoId')
+                if not stop_loss_order_id:
+                    logger.error("❌ 止损单返回缺少 algoId: %s", stop_loss_result)
+                    return None
                 # 更新监控数据
                 with self.lock:
                     if order_id in self.order_monitor_list:
@@ -1334,7 +1358,7 @@ class OrdersMonitor:
     def _place_take_profit_order(self, order_id: str, symbol: str, signal_type: str, 
                                 executed_qty: float, avg_price: float, sl_tp_data: dict) -> str:
         """
-        提交止盈单（使用基础订单限价止盈）
+        提交 TAKE_PROFIT_MARKET Algo 止盈单。
         
         Args:
             order_id: 限价单ID
@@ -1359,44 +1383,37 @@ class OrdersMonitor:
         # 计算止盈触发价格
         take_profit_trigger_price = self._calculate_take_profit_price(signal_type, avg_price, price_param, price_type)
         
-        # 计算限价（确保能成交）
-        # 多头平仓（SELL）：限价略低于触发价格
-        # 空头平仓（BUY）：限价略高于触发价格
-        # if signal_type == 'LONG':  # 多头平仓，SELL
-        #     # 限价设置为触发价格的 99.9%，确保能成交
-        #     take_profit_limit_price = take_profit_trigger_price * 0.999
-        # else:  # 空头平仓，BUY
-        #     # 限价设置为触发价格的 100.1%，确保能成交
-        #     take_profit_limit_price = take_profit_trigger_price * 1.001
-        
-        take_profit_limit_price = take_profit_trigger_price  # ✅ 直接使用触发价格作为限价，这里我们使用基础订单方式，保证了触达即成交，不需要设置偏移价了
         try:
-            # ✅ 使用新的基础订单限价止盈接口
-            take_profit_result = self.binance_client.place_take_profit_limit_order(
+            take_profit_result = self.binance_client.place_take_profit_order(
                 symbol=symbol,
                 side=take_profit_side,
-                stop_price=take_profit_trigger_price,  # 触发价格
-                price=take_profit_limit_price,  # 限价
+                price=take_profit_trigger_price,
                 quantity=executed_qty,
                 position_side=position_side
             )
             
             # ✅ 检查下单结果
             if take_profit_result is not None and not take_profit_result.get('error'):
-                # ✅ 基础订单返回 orderId（不是 algoId）
-                take_profit_order_id = take_profit_result.get('orderId')
-                client_order_id = take_profit_result.get('clientOrderId')
+                take_profit_order_id = take_profit_result.get('algoId')
+                client_order_id = take_profit_result.get('clientAlgoId')
+                if not take_profit_order_id:
+                    logger.error("❌ 止盈单返回缺少 algoId: %s", take_profit_result)
+                    return None
                 
                 # 更新监控数据
                 with self.lock:
                     if order_id in self.order_monitor_list:
                         self.order_monitor_list[order_id]['take_profit_order_id'] = take_profit_order_id
                 
-                # ✅ 注意：基础订单（TAKE_PROFIT）不需要添加到 sl_tp_order_monitor_list
-                # sl_tp_order_monitor_list 专门用于监控 Algo Order (ALGO_UPDATE 事件)
-                # 基础订单会通过普通的 ORDER_TRADE_UPDATE 事件更新状态
-                
-                logger.info(f"✅ 限价止盈单已提交: order_id={take_profit_order_id}, trigger_price={take_profit_trigger_price:.2f}, limit_price={take_profit_limit_price:.2f}, quantity={executed_qty}, 触发信号订单ID: {order_id}")
+                self._add_sl_tp_order_to_monitor(
+                    algo_order_id=str(take_profit_order_id),
+                    client_algo_id=str(client_order_id) if client_order_id else None,
+                    order_type='TAKE_PROFIT', symbol=symbol,
+                    strategy_id=sl_tp_data.get('strategy_id'),
+                    signal_order_id=str(order_id),
+                    price=take_profit_trigger_price, quantity=executed_qty)
+
+                logger.info(f"✅ 止盈市价条件单已提交: algo_id={take_profit_order_id}, trigger_price={take_profit_trigger_price:.2f}, quantity={executed_qty}, 触发信号订单ID: {order_id}")
                 
                 # ✅ 创建数据库订单记录
                 strategy_id = sl_tp_data.get('strategy_id')
@@ -1410,7 +1427,7 @@ class OrdersMonitor:
                                 'symbol': symbol,
                                 'side': take_profit_side,
                                 'position_side': position_side,
-                                'order_type': 'TAKE_PROFIT',  # ✅ 基础订单类型：TAKE_PROFIT（限价止盈）
+                                'order_type': 'TAKE_PROFIT_MARKET',
                                 'quantity': executed_qty,
                                 'price': take_profit_trigger_price,  # 使用触发价格作为订单价格
                                 'status': 'NEW',
@@ -1431,15 +1448,15 @@ class OrdersMonitor:
             else:
                 # ✅ 下单失败，记录警告
                 if take_profit_result is None:
-                    logger.warning(f"⚠️ 下限价止盈单失败: 返回 None (可能网络超时或API错误)")
+                    logger.warning(f"⚠️ 下止盈市价条件单失败: 返回 None (可能网络超时或API错误)")
                 else:
                     error_msg = take_profit_result.get('error_message', '未知错误')
-                    logger.warning(f"⚠️ 下限价止盈单失败: {error_msg}")
+                    logger.warning(f"⚠️ 下止盈市价条件单失败: {error_msg}")
                 error_msg = take_profit_result.get('error_message', '未知错误') if take_profit_result else '返回结果为None'
-                logger.error(f"❌ 限价止盈单提交失败: {error_msg}")
+                logger.error(f"❌ 止盈市价条件单提交失败: {error_msg}")
                 return None
         except Exception as e:
-            logger.error(f"❌ 限价止盈单提交异常: {e}")
+            logger.error(f"❌ 止盈市价条件单提交异常: {e}")
             import traceback
             traceback.print_exc()
             return None
@@ -1546,12 +1563,23 @@ class OrdersMonitor:
             return
         
         try:
+            signal_type = sl_tp_data.get('signal_type', 'LONG')
+            stop_loss = sl_tp_data.get('stop_loss')
+            take_profit = sl_tp_data.get('take_profit')
             self.on_order_filled_callback({
                 'order_id': order_id,
                 'executed_qty': executed_qty,
                 'avg_price': avg_price,
                 'stop_loss_order_id': stop_loss_order_id,
                 'take_profit_order_id': take_profit_order_id,
+                'symbol': sl_tp_data.get('symbol'),
+                'signal_type': signal_type,
+                'stop_loss_price': self._calculate_stop_loss_price(
+                    signal_type, avg_price, stop_loss.get('price_param', 0),
+                    stop_loss.get('price_type', '差值')) if stop_loss else None,
+                'take_profit_price': self._calculate_take_profit_price(
+                    signal_type, avg_price, take_profit.get('price_param', 0),
+                    take_profit.get('price_type', '差值')) if take_profit else None,
                 'strategy_id': sl_tp_data.get('strategy_id'),
                 'strategy_name': sl_tp_data.get('strategy_name')
             })
@@ -1619,10 +1647,9 @@ class OrdersMonitor:
         strategy_id = sl_tp_data.get('strategy_id')
         
         # 2. 取消旧的止盈止损订单（如果存在）
-        # ✅ 止损订单仍然是 Algo Order，使用 cancel_algo_order
+        # 止损和止盈都是 Algo Order。
         self._cancel_old_algo_order(old_stop_loss_order_id, symbol, '止损', strategy_id)
-        # ✅ 止盈订单现在是基础订单（TAKE_PROFIT），使用 cancel_order
-        self._cancel_old_order(old_take_profit_order_id, symbol, '止盈', strategy_id)
+        self._cancel_old_algo_order(old_take_profit_order_id, symbol, '止盈', strategy_id)
         
         # 3. 提交新的止损单和止盈单（仅下缺失的订单）
         stop_loss_order_id = self._place_stop_loss_order(

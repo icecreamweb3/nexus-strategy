@@ -64,3 +64,21 @@ def test_reduce_only_one_way_order_uses_position_direction(tmp_path):
     assert values["trade_direction"] == "LONG"
     assert values["action_type"] == "TP"
     assert values["use_type"] == "TP_CLOSE"
+
+
+def test_position_protection_prices_survive_position_refresh(tmp_path):
+    database = TradingDatabase(str(tmp_path / "trading.sqlite3"))
+    position = {
+        "symbol": "BTCUSDT", "positionSide": "BOTH",
+        "positionAmt": "0.001", "entryPrice": "77500",
+        "leverage": "100", "marginType": "cross",
+    }
+    database.sync_positions([position])
+    database.set_position_protection(
+        "BTCUSDT", "LONG", tp_price=78275, sl_price=76725)
+
+    database.sync_positions([position])
+
+    current = database.current_positions()[0]
+    assert current["tp_price"] == 78275
+    assert current["sl_price"] == 76725

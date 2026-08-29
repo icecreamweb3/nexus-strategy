@@ -178,7 +178,7 @@ class BacktestTab(QWidget):
         self.chk_single = QCheckBox()
         self.chk_single.setChecked(True)
         self._reg(self.chk_single.setText, "cond_single_change")
-        self.sp_single_pct = _dspin(0.04, decimals=4, minimum=0.0001)
+        self.sp_single_pct = _dspin(0.004, decimals=4, minimum=0.0001)
         self.sp_single_pct.setSingleStep(0.0001)
         self.sp_single_max_pct = _dspin(100.0, decimals=4)
         single_row = QWidget()
@@ -275,7 +275,7 @@ class BacktestTab(QWidget):
 
         self.sp_total_capital = _dspin(100.0)
         self.sp_split_count = _ispin(1, maximum=100000, minimum=1)
-        self.sp_leverage = _dspin(1.0, maximum=1000.0, decimals=4)
+        self.sp_leverage = _dspin(100.0, maximum=1000.0, decimals=4)
         self.sp_fee = _dspin(0.03, decimals=4)
         self.sp_stop_loss = _dspin(1.0, maximum=100.0, decimals=4)
         self.sp_cooldown = _ispin(10)

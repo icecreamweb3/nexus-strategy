@@ -12,6 +12,7 @@ from app.client.binance_websocket import OrdersMonitor
 class KlineStream(QObject):
     closed_kline = pyqtSignal(object)
     order_update = pyqtSignal(dict)
+    protection_update = pyqtSignal(dict)
     connected = pyqtSignal()
     disconnected = pyqtSignal()
     failed = pyqtSignal(str)
@@ -34,6 +35,7 @@ class KlineStream(QObject):
             return
         monitor = OrdersMonitor(
             self.binance_client,
+            on_order_filled_callback=self.protection_update.emit,
             symbol=self.symbol,
             interval=self.interval,
             on_kline_closed=self._on_kline_closed,
@@ -41,13 +43,27 @@ class KlineStream(QObject):
             testnet=self.testnet,
         )
         self._monitor = monitor
-        monitor.start()
+        try:
+            monitor.start()
+        except Exception as exc:
+            self._monitor = None
+            error = f"Binance WebSocket 启动异常: {exc}"
+            self.failed.emit(error)
+            raise RuntimeError(error) from exc
         if not monitor.running:
             self._monitor = None
-            error = "Binance WebSocket 框架启动失败"
+            error = monitor.last_start_error or "Binance WebSocket 框架启动失败"
             self.failed.emit(error)
             raise RuntimeError(error)
         self.connected.emit()
+
+    def monitor_filled_order(self, order_id: str, order_info: dict,
+                             protection: dict) -> None:
+        """注册开仓单，成交后按配置提交 TP/SL 保护单。"""
+        monitor = self._monitor
+        if monitor is None or not monitor.running:
+            raise RuntimeError("Binance 订单监控未运行")
+        monitor.add_order_to_monitor(str(order_id), order_info, protection)
 
     def stop(self):
         monitor = self._monitor

@@ -184,6 +184,8 @@ class BinanceClient:
             'X-MBX-APIKEY': self.api_key,
             'Content-Type': 'application/x-www-form-urlencoded'
         }
+        # OrdersMonitor uses this to surface the real listen-key failure in the UI.
+        self.last_user_data_stream_error = None
         
         # 初始化的时候设置时间戳偏移
         self.last_time_sync = 0  # 记录上次同步时间
@@ -3155,6 +3157,48 @@ class BinanceClient:
             logger.debug(f"Failed to close position for {symbol}: {e}")
             logger.exception(f"平仓异常详情")
             return None
+
+    def close_all_positions(self) -> dict:
+        """以市价单逐一平掉账户中当前所有合约持仓。"""
+        closed = []
+        failed = []
+        positions = self.get_positions()
+        for position in positions:
+            symbol = str(position.get('symbol', '')).upper()
+            try:
+                amount = float(position.get(
+                    'positionAmt', position.get('quantity', 0)) or 0)
+                if not symbol or amount == 0:
+                    continue
+                raw_side = str(position.get('positionSide', '') or '').upper()
+                side = raw_side if raw_side in ('LONG', 'SHORT') \
+                    else ('LONG' if amount > 0 else 'SHORT')
+                quantity = abs(amount)
+                result = self.close_position(symbol, quantity, side)
+                if not result or result.get('error'):
+                    message = result.get('error_message', '平仓接口未返回结果') \
+                        if isinstance(result, dict) else '平仓接口未返回结果'
+                    failed.append({
+                        'symbol': symbol, 'side': side,
+                        'quantity': quantity, 'error': message,
+                    })
+                    continue
+                order_id = result.get('orderId')
+                final_order = self.get_order_status(symbol, str(order_id)) \
+                    if order_id is not None else None
+                closed.append({
+                    'symbol': symbol, 'side': side, 'quantity': quantity,
+                    'order': final_order or result,
+                })
+            except Exception as exc:
+                failed.append({
+                    'symbol': symbol or '?',
+                    'side': str(position.get('positionSide', '') or '?'),
+                    'quantity': abs(float(position.get(
+                        'positionAmt', position.get('quantity', 0)) or 0)),
+                    'error': str(exc),
+                })
+        return {'closed': closed, 'failed': failed}
     
     def get_account_margin_ratio(self) -> Optional[float]:
         """Calculate Account Margin Ratio = Account Maintenance Margin / Account Equity"""
@@ -3354,29 +3398,60 @@ class BinanceClient:
         Returns:
             str: listenKey，如果失败返回None
         """
-        try:
-            import requests
-            url = f"{self.base_url}/fapi/v1/listenKey"
-            
-            response = requests.post(
-                url,
-                headers=self.default_headers,
-                proxies=self.proxy_config,
-                timeout=10
-            )
-            
-            if response.status_code == 200:
-                result = response.json()
-                listen_key = result.get('listenKey')
-                logger.debug(f"✅ User Data Stream listenKey获取成功: {listen_key[:20] if listen_key else 'N/A'}...")
-                return listen_key
-            else:
-                logger.debug(f"❌ 获取listenKey失败: {response.status_code}, {response.text}")
-                return None
-        except Exception as e:
-            logger.debug(f"❌ 获取listenKey异常: {str(e)}")
-            logger.exception(f"获取listenKey异常详情")
-            return None
+        import requests
+
+        url = f"{self.base_url}/fapi/v1/listenKey"
+        self.last_user_data_stream_error = None
+        attempts = self.MAX_RETRIES + 1
+        for attempt in range(attempts):
+            try:
+                response = requests.post(
+                    url,
+                    headers=self.default_headers,
+                    proxies=self.proxy_config,
+                    timeout=(self.CONNECT_TIMEOUT, self.READ_TIMEOUT),
+                )
+                if response.status_code == 200:
+                    result = response.json()
+                    listen_key = result.get('listenKey')
+                    if listen_key:
+                        if attempt:
+                            logger.info(
+                                "✅ User Data Stream listenKey 在第 %d 次重试后获取成功",
+                                attempt,
+                            )
+                        return listen_key
+                    self.last_user_data_stream_error = "Binance 返回中缺少 listenKey"
+                    break
+
+                response_text = response.text.strip()
+                self.last_user_data_stream_error = (
+                    f"HTTP {response.status_code}: {response_text or 'empty response'}"
+                )
+                # Authentication/configuration errors will not improve by retrying.
+                if response.status_code < 500 and response.status_code != 429:
+                    break
+            except requests.RequestException as exc:
+                self.last_user_data_stream_error = f"{type(exc).__name__}: {exc}"
+            except (TypeError, ValueError) as exc:
+                self.last_user_data_stream_error = f"{type(exc).__name__}: {exc}"
+                break
+
+            if attempt < attempts - 1:
+                wait_time = 2 ** attempt
+                logger.warning(
+                    "⚠️ 获取 User Data Stream listenKey 失败，%d 秒后重试 "
+                    "(%d/%d): %s",
+                    wait_time, attempt + 1, attempts,
+                    self.last_user_data_stream_error,
+                )
+                time.sleep(wait_time)
+
+        logger.error(
+            "❌ 获取 User Data Stream listenKey 失败: %s",
+            self.last_user_data_stream_error or "未知错误",
+        )
+        return None
     
     def keepalive_user_data_stream(self, listen_key: str) -> bool:
         """

@@ -1,6 +1,8 @@
 """实时策略页：Binance K线 → 原条件检测 → 合约市价单。"""
 from __future__ import annotations
 
+from datetime import datetime, timezone
+
 from PyQt5.QtCore import QTimer
 from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
@@ -9,7 +11,7 @@ from PyQt5.QtWidgets import (
     QHeaderView, QTabWidget, QHBoxLayout, QWidget,
 )
 
-from app.backtest.engine import LONG
+from app.backtest.engine import LONG, base_order_notional, required_order_margin
 from app.client.kline_stream import KlineStream, PerpetualPriceStream
 from app.client.live_gateway import BinanceLiveGateway
 from app.config import load_config
@@ -38,6 +40,8 @@ class RealtimeStrategyTab(BacktestTab):
         self._running = False
         self._placing_order = False
         self._latest_close = None
+        self._live_prices = {}
+        self._current_position_rows = []
         self._live_log_file = None
         self._live_log_path = ""
         self._db = TradingDatabase()
@@ -114,7 +118,7 @@ class RealtimeStrategyTab(BacktestTab):
         self.btn_start.clicked.connect(self._start_live)
         self.btn_close = QPushButton()
         self._reg(self.btn_close.setText, "live_close_trading")
-        self.btn_close.clicked.connect(self.stop_live)
+        self.btn_close.clicked.connect(self._close_all_positions_and_stop)
         self.btn_close.setEnabled(False)
         grid.addWidget(self.btn_start, 0, 9)
         grid.addWidget(self.btn_close, 0, 10)
@@ -253,6 +257,7 @@ class RealtimeStrategyTab(BacktestTab):
                 gateway.client, symbol, interval, config.testnet, self)
             stream.closed_kline.connect(self._on_closed_kline)
             stream.order_update.connect(self._on_order_update)
+            stream.protection_update.connect(self._on_protection_update)
             stream.failed.connect(self._on_stream_error)
 
             self._gateway = gateway
@@ -300,6 +305,58 @@ class RealtimeStrategyTab(BacktestTab):
         self.params_widget.setEnabled(True)
         self.retranslate()
 
+    def _close_all_positions_and_stop(self):
+        """停止策略并市价平掉 Binance 账户的全部当前持仓。"""
+        client = self._gateway.client if self._gateway is not None else None
+        self._running = False
+        self._placing_order = True
+        stream = self._kline_stream
+        self._kline_stream = None
+        if stream is not None:
+            stream.stop()
+
+        try:
+            if client is None:
+                config = load_config()
+                if not config.has_credentials:
+                    raise RuntimeError(tr("live_no_credentials"))
+                client = BinanceLiveGateway(config).client
+
+            summary = client.close_all_positions()
+            for item in summary["closed"]:
+                order = item["order"]
+                close_side = "SELL" if item["side"] == LONG else "BUY"
+                self._insert_order(order, item["symbol"], close_side)
+                self._record_log(tr(
+                    "realtime_position_closed", symbol=item["symbol"],
+                    side=item["side"], quantity=f"{item['quantity']:g}"), True)
+
+            failures = summary["failed"]
+            if failures:
+                detail = "; ".join(
+                    f"{item['symbol']} {item['side']} {item['quantity']:g}: "
+                    f"{item['error']}" for item in failures)
+                self._record_log(tr(
+                    "realtime_close_positions_partial", err=detail), True)
+                QMessageBox.warning(
+                    self, tr("app_title"),
+                    tr("realtime_close_positions_partial", err=detail))
+            else:
+                self._record_log(tr(
+                    "realtime_all_positions_closed",
+                    count=len(summary["closed"])), True)
+
+            self._db.sync_positions(client.get_positions())
+            self._refresh_record_tables()
+        except Exception as exc:  # noqa: BLE001
+            self._record_log(tr("realtime_close_positions_failed", err=exc), True)
+            QMessageBox.warning(
+                self, tr("app_title"),
+                tr("realtime_close_positions_failed", err=exc))
+        finally:
+            self._placing_order = False
+            self.stop_live()
+
     def _on_stream_error(self, error: str):
         self._record_log(tr("realtime_ws_error", err=error), False)
 
@@ -343,13 +400,17 @@ class RealtimeStrategyTab(BacktestTab):
         if self._price_stream is not None:
             self._price_stream.stop()
         self._price_stream = None
+        # 切换交易对后不沿用旧连接的价格；首个新价格到达前显示 REST PnL。
+        self._live_prices.clear()
         symbol = self.cmb_symbol.currentText().strip().upper()
         if not symbol:
             self.lbl_latest_value.setText("—")
             return
         stream = PerpetualPriceStream(
             symbol=symbol, testnet=load_config().testnet, parent=self)
-        stream.price_update.connect(self._on_live_price)
+        stream.price_update.connect(
+            lambda price, stream_symbol=symbol:
+            self._on_live_price(stream_symbol, price))
         stream.failed.connect(self._on_stream_error)
         self._price_stream = stream
         self.lbl_latest_value.setText(f"{symbol} PERP  —")
@@ -360,10 +421,14 @@ class RealtimeStrategyTab(BacktestTab):
         QTimer.singleShot(
             0, lambda: self._refresh_account(show_errors=False))
 
-    def _on_live_price(self, price: float):
+    def _on_live_price(self, symbol: str, price: float):
+        current_symbol = self.cmb_symbol.currentText().strip().upper()
+        if symbol != current_symbol:
+            return
         self._latest_close = price
-        symbol = self.cmb_symbol.currentText().strip().upper()
+        self._live_prices[symbol] = price
         self.lbl_latest_value.setText(f"{symbol} PERP  {price:,.2f}")
+        self._update_live_unrealized_pnl(symbol, price)
 
     def _place_signal_order(self, signal: LiveSignal):
         if self._placing_order or self._gateway is None:
@@ -384,18 +449,17 @@ class RealtimeStrategyTab(BacktestTab):
             margin_asset, available_balance = self._available_margin_balance(
                 account, symbol)
             reference_price = self._latest_close or signal.kline.close
-            target_notional = (
-                order.total_capital / order.split_count * order.leverage)
+            target_notional = base_order_notional(
+                order.total_capital, order.split_count)
             quantity = self._gateway.normalize_quantity(
                 symbol, target_notional / reference_price)
             actual_notional = quantity * reference_price
-            estimated_margin = actual_notional / order.leverage
-            estimated_fee = actual_notional * order.fee_rate_pct / 100
-            safety_buffer = estimated_margin * 0.005
-            required_margin = estimated_margin + estimated_fee + safety_buffer
+            required_margin = required_order_margin(
+                actual_notional, order.leverage, order.fee_rate_pct)
             self._record_log(tr(
                 "realtime_order_margin_check", symbol=symbol,
                 quantity=f"{quantity:g}", notional=f"{actual_notional:.2f}",
+                leverage=f"{order.leverage:g}",
                 required=f"{required_margin:.2f}", available=f"{available_balance:.2f}",
                 asset=margin_asset), True)
             if available_balance < required_margin:
@@ -410,6 +474,35 @@ class RealtimeStrategyTab(BacktestTab):
             result = self._gateway.market_order(
                 symbol, side, quantity, position_side=position_side)
             self._insert_order(result, symbol, side)
+            order_id = result.get("orderId")
+            if order_id is None:
+                raise RuntimeError("Binance 开仓返回缺少 orderId")
+            close_side = "SELL" if signal.direction == LONG else "BUY"
+            protection = {
+                "symbol": symbol,
+                "signal_type": signal.direction,
+                "signal_kline_index": signal.kline.index,
+                "stop_loss": ({
+                    "price_param": order.stop_loss, "price_type": "百分比",
+                    "side": close_side, "position_side": signal.direction,
+                } if order.stop_loss > 0 else None),
+                "take_profit": ({
+                    "price_param": order.take_profit, "price_type": "百分比",
+                    "side": close_side, "position_side": signal.direction,
+                } if order.take_profit > 0 else None),
+            }
+            try:
+                self._kline_stream.monitor_filled_order(
+                    str(order_id), {
+                        "symbol": symbol, "side": side, "quantity": quantity,
+                        "position_side": position_side or "BOTH",
+                    }, protection)
+            except Exception as protection_exc:  # noqa: BLE001
+                self._record_log(tr(
+                    "realtime_protection_failed", err=protection_exc), True)
+                QMessageBox.warning(
+                    self, tr("app_title"),
+                    tr("realtime_protection_failed", err=protection_exc))
             self._record_log(tr(
                 "realtime_order_sent", side=signal.direction,
                 quantity=result.get("origQty", quantity), symbol=symbol,
@@ -419,6 +512,60 @@ class RealtimeStrategyTab(BacktestTab):
             QMessageBox.warning(self, tr("app_title"), tr("live_error", err=exc))
         finally:
             self._placing_order = False
+
+    def _on_protection_update(self, update: dict):
+        """保存保护单及触发价，并刷新持仓/挂单表。"""
+        try:
+            symbol = str(update.get("symbol") or "").upper()
+            direction = str(update.get("signal_type") or "").upper()
+            avg_price = float(update.get("avg_price") or 0)
+            quantity = float(update.get("executed_qty") or 0)
+            tp_price = update.get("take_profit_price")
+            sl_price = update.get("stop_loss_price")
+            close_side = "SELL" if direction == LONG else "BUY"
+
+            if self._gateway is not None:
+                self._db.sync_positions(self._gateway.client.get_positions(symbol))
+            self._db.set_position_protection(
+                symbol, direction, tp_price=tp_price, sl_price=sl_price)
+
+            protection_orders = (
+                (update.get("take_profit_order_id"), "TAKE_PROFIT_MARKET", tp_price, "TP"),
+                (update.get("stop_loss_order_id"), "STOP_MARKET", sl_price, "SL"),
+            )
+            for algo_id, order_type, trigger_price, action_type in protection_orders:
+                if not algo_id:
+                    continue
+                self._db.upsert_order({
+                    "orderId": str(algo_id), "algoId": str(algo_id),
+                    "symbol": symbol, "side": close_side,
+                    "positionSide": direction or "BOTH", "type": order_type,
+                    "origQty": quantity, "stopPrice": trigger_price,
+                    "price": trigger_price, "status": "NEW",
+                    "action_type": action_type,
+                    "use_type": f"{action_type}_CLOSE",
+                })
+
+            missing = []
+            if tp_price is not None and not update.get("take_profit_order_id"):
+                missing.append("TP")
+            if sl_price is not None and not update.get("stop_loss_order_id"):
+                missing.append("SL")
+            if missing:
+                warning = tr(
+                    "realtime_protection_partial", missing=", ".join(missing))
+                self._record_log(warning, True)
+                QMessageBox.warning(self, tr("app_title"), warning)
+            else:
+                self._record_log(tr(
+                    "realtime_protection_sent", symbol=symbol,
+                    entry=f"{avg_price:.2f}",
+                    tp=f"{float(tp_price):.2f}" if tp_price is not None else "Disabled",
+                    sl=f"{float(sl_price):.2f}" if sl_price is not None else "Disabled"), True)
+            self._refresh_record_tables()
+        except Exception as exc:  # noqa: BLE001
+            get_logger().exception("保存 TP/SL 保护单失败")
+            self._record_log(tr("realtime_protection_failed", err=exc), True)
 
     def _refresh_account(self, show_errors: bool = True):
         """刷新余额和账户风险率。"""
@@ -527,6 +674,77 @@ class RealtimeStrategyTab(BacktestTab):
         except (TypeError, ValueError):
             return str(value)
 
+    @staticmethod
+    def _format_local_time(value) -> str:
+        """把 Binance/SQLite 的 UTC 时间转换为当前系统本地时区。"""
+        if value in (None, ""):
+            return ""
+        try:
+            if isinstance(value, (int, float)):
+                timestamp = float(value)
+                if abs(timestamp) >= 100_000_000_000:
+                    timestamp /= 1000
+                parsed = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+            elif isinstance(value, datetime):
+                parsed = value
+            else:
+                text = str(value).strip()
+                if text.replace(".", "", 1).isdigit():
+                    timestamp = float(text)
+                    if abs(timestamp) >= 100_000_000_000:
+                        timestamp /= 1000
+                    parsed = datetime.fromtimestamp(timestamp, tz=timezone.utc)
+                else:
+                    parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone().strftime("%Y-%m-%d %H:%M:%S")
+        except (TypeError, ValueError, OSError):
+            return str(value)
+
+    @staticmethod
+    def _calculate_unrealized_pnl(position: dict, price: float):
+        """按 USD-M 线性合约价格实时计算未实现盈亏。"""
+        try:
+            entry_price = float(position.get("avg_entry_price", 0) or 0)
+            quantity = abs(float(position.get("quantity", 0) or 0))
+            live_price = float(price)
+        except (TypeError, ValueError):
+            return None
+        if entry_price <= 0 or quantity <= 0 or live_price <= 0:
+            return None
+        side = str(position.get("position_side", "") or "").upper()
+        if side == LONG:
+            return (live_price - entry_price) * quantity
+        if side == "SHORT":
+            return (entry_price - live_price) * quantity
+        return None
+
+    def _position_unrealized_pnl(self, position: dict):
+        live_price = self._live_prices.get(str(position.get("symbol", "")).upper())
+        if live_price is not None:
+            calculated = self._calculate_unrealized_pnl(position, live_price)
+            if calculated is not None:
+                return calculated
+        return position.get("unrealized_pnl")
+
+    def _update_live_unrealized_pnl(self, symbol: str, price: float):
+        """仅更新持仓表的 PnL 单元格，避免每个成交推送都重查数据库。"""
+        if not hasattr(self, "position_table"):
+            return
+        for row_index, position in enumerate(self._current_position_rows):
+            if str(position.get("symbol", "")).upper() != symbol:
+                continue
+            pnl = self._calculate_unrealized_pnl(position, price)
+            if pnl is None:
+                continue
+            item = self.position_table.item(row_index, 6)
+            if item is None:
+                item = QTableWidgetItem()
+                self.position_table.setItem(row_index, 6, item)
+            item.setText(self._format_number(pnl))
+            item.setForeground(QColor("#00a000" if pnl >= 0 else "#e00000"))
+
     def _fill_table(self, table: QTableWidget, rows, fields, pnl_columns=()):
         table.setRowCount(len(rows))
         for row_index, row in enumerate(rows):
@@ -545,22 +763,26 @@ class RealtimeStrategyTab(BacktestTab):
         if not hasattr(self, "position_table"):
             return
         n = self._format_number
-        self._fill_table(self.position_table, self._db.current_positions(), [
+        local_time = self._format_local_time
+        positions = self._db.current_positions()
+        self._current_position_rows = positions
+        self._fill_table(self.position_table, positions, [
             "symbol", "position_mode", "position_side", lambda r: n(r["quantity"]),
-            lambda r: n(r["avg_entry_price"], 2), "updated_at",
-            lambda r: n(r["unrealized_pnl"]), lambda r: n(r["tp_price"], 2),
+            lambda r: n(r["avg_entry_price"], 2), lambda r: local_time(r["updated_at"]),
+            lambda r: n(self._position_unrealized_pnl(r)), lambda r: n(r["tp_price"], 2),
             lambda r: n(r["sl_price"], 2), lambda r: n(r["liquidation_price"], 2),
         ], pnl_columns=(6,))
         self._fill_table(self.position_history_table, self._db.position_history(), [
             "symbol", "side", lambda r: n(r["entry_price"], 2),
             lambda r: n(r["close_price"], 2), lambda r: n(r["quantity"]),
             lambda r: n(r["realized_pnl"]), lambda r: n(r["commission"]),
-            "position_mode", "updated_at",
+            "position_mode", lambda r: local_time(r["updated_at"]),
         ], pnl_columns=(5,))
         self._fill_table(self.open_orders_table, self._db.current_orders(), [
             "order_id", "symbol", "trade_direction", "action_type", "order_type",
             lambda r: n(r["price"], 2), lambda r: n(r["quantity"]),
-            lambda r: n(r["filled_qty"]), "status", "updated_at",
+            lambda r: n(r["filled_qty"]), "status",
+            lambda r: local_time(r["updated_at"]),
         ])
         order_history = self._db.order_history()
         selected_status = self.order_status_filter.currentText()
@@ -571,7 +793,7 @@ class RealtimeStrategyTab(BacktestTab):
             "symbol", "side", "order_type", lambda r: n(r["price"], 2),
             lambda r: n(r["avg_price"], 2), lambda r: n(r["quantity"]),
             lambda r: n(r["filled_qty"]), lambda r: n(r["commission"]),
-            "status", "updated_at",
+            "status", lambda r: local_time(r["updated_at"]),
         ])
     def _cancel_selected_order(self):
         row = self.open_orders_table.currentRow()

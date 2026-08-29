@@ -330,8 +330,10 @@ class TradingDatabase:
                     "ON CONFLICT(exchange, symbol, position_side) DO UPDATE SET "
                     "position_mode=excluded.position_mode, status='OPEN', "
                     "quantity=excluded.quantity, avg_entry_price=excluded.avg_entry_price, "
-                    "liquidation_price=excluded.liquidation_price, tp_price=excluded.tp_price, "
-                    "sl_price=excluded.sl_price, unrealized_pnl=excluded.unrealized_pnl, "
+                    "liquidation_price=excluded.liquidation_price, "
+                    "tp_price=COALESCE(excluded.tp_price, positions.tp_price), "
+                    "sl_price=COALESCE(excluded.sl_price, positions.sl_price), "
+                    "unrealized_pnl=excluded.unrealized_pnl, "
                     "realized_pnl=excluded.realized_pnl, leverage=excluded.leverage, "
                     "margin_type=excluded.margin_type, updated_at=excluded.updated_at",
                     values,
@@ -371,6 +373,18 @@ class TradingDatabase:
                     "UPDATE positions SET status='CLOSE', quantity=0, updated_at=? WHERE id=?",
                     (now, row["id"]),
                 )
+
+    def set_position_protection(self, symbol: str, position_side: str,
+                                tp_price=None, sl_price=None) -> None:
+        """保存已提交保护单的触发价。"""
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE positions SET tp_price=?, sl_price=?, updated_at=? "
+                "WHERE exchange='binance' AND symbol=? AND position_side=? "
+                "AND status='OPEN'",
+                (tp_price, sl_price, _utc_now(), symbol.upper(),
+                 position_side.upper()),
+            )
 
     def rows(self, query: str, params: tuple = ()) -> list[dict]:
         with self._connect() as connection:

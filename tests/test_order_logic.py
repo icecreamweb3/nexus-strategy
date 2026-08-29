@@ -1,7 +1,10 @@
 import unittest
 
 from app.backtest.data_loader import Kline
-from app.backtest.engine import BacktestEngine, LONG, OrderParams, StrategyParams
+from app.backtest.engine import (
+    BacktestEngine, LONG, OrderParams, StrategyParams,
+    base_order_notional, required_order_margin,
+)
 
 
 def kline(index, open_, high, low, close):
@@ -22,7 +25,10 @@ def signal_params():
 
 
 class OrderLogicTests(unittest.TestCase):
-    def test_order_amount_uses_capital_split_count_and_leverage(self):
+    def test_default_leverage_is_one_hundred(self):
+        self.assertEqual(OrderParams().leverage, 100.0)
+
+    def test_order_amount_uses_capital_and_split_count_not_leverage(self):
         engine = BacktestEngine(
             [], signal_params(),
             OrderParams(total_capital=100000, split_count=5, leverage=6),
@@ -30,11 +36,19 @@ class OrderLogicTests(unittest.TestCase):
 
         position = engine._new_position(LONG, 1, 100)
 
-        self.assertEqual(position.cost, 120000)
-        self.assertEqual(position.qty, 1200)
+        self.assertEqual(position.cost, 20000)
+        self.assertEqual(position.qty, 200)
+
+    def test_one_hundred_x_reduces_margin_without_increasing_notional(self):
+        notional = base_order_notional(100, 1)
+
+        required = required_order_margin(notional, 100, 0.03)
+
+        self.assertEqual(notional, 100)
+        self.assertAlmostEqual(required, 1.035)
 
     def test_next_order_uses_capital_remaining_after_close(self):
-        cases = (("SL", 90, 88000, 105600), ("TP", 110, 112000, 134400))
+        cases = (("SL", 90, 98000, 19600), ("TP", 110, 102000, 20400))
         for exit_type, exit_price, capital, next_amount in cases:
             with self.subTest(exit_type=exit_type):
                 engine = BacktestEngine(
@@ -47,7 +61,7 @@ class OrderLogicTests(unittest.TestCase):
                 engine._close_trade(first, 2, exit_price, exit_type)
                 second = engine._new_position(LONG, 3, 100)
 
-                self.assertEqual(first.cost, 120000)
+                self.assertEqual(first.cost, 20000)
                 self.assertEqual(engine.current_capital, capital)
                 self.assertEqual(second.cost, next_amount)
 
@@ -63,6 +77,7 @@ class OrderLogicTests(unittest.TestCase):
             signal_params(),
             OrderParams(
                 total_capital=10000,
+                leverage=1,
                 fee_rate_pct=0,
                 order_type="MARKET",
                 add_interval_pct=10,
