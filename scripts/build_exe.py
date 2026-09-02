@@ -60,8 +60,8 @@ def main() -> int:
         return 2
 
     data_separator = os.pathsep
-    build_time = datetime.now(timezone.utc).astimezone().strftime(
-        "%Y-%m-%d %H:%M:%S %Z")
+    build_time = datetime.now(timezone.utc).astimezone().isoformat(
+        timespec="seconds")
     metadata_file = Path(tempfile.gettempdir()) / "nexus_strategy_build_info.json"
     metadata_file.write_text(json.dumps({
         "version": APP_VERSION,

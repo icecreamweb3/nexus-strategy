@@ -44,7 +44,7 @@ class MainWindow(QMainWindow):
         self.statusBar().clearMessage()
         self.lbl_build_info.setText(tr(
             "version_build_info", version=APP_VERSION,
-            build_time=get_build_time()))
+            build_time=get_build_time(i18n().lang)))
 
     def closeEvent(self, event):
         self.backtest_tab.close_listener()
