@@ -27,6 +27,7 @@ SYMBOLS = (
     "SOLUSDT", "XRPUSDT", "DOGEUSDT",
 )
 INTERVALS = ("1m", "3m", "5m", "15m", "30m", "1h", "2h", "4h", "6h", "8h", "12h", "1d")
+EXCHANGE_LEVERAGE = 100
 
 
 class RealtimeStrategyTab(BacktestTab):
@@ -39,6 +40,10 @@ class RealtimeStrategyTab(BacktestTab):
         self._processor = None
         self._running = False
         self._placing_order = False
+        self._strategy_capital = None
+        self._pending_realized_pnl = 0.0
+        self._processed_trade_ids = set()
+        self._entry_kline_index = None
         self._latest_close = None
         self._live_prices = {}
         self._current_position_rows = []
@@ -52,6 +57,10 @@ class RealtimeStrategyTab(BacktestTab):
                 self._on_symbol_changed)
         QTimer.singleShot(0, self._restart_price_stream)
         QTimer.singleShot(100, lambda: self._refresh_account(show_errors=False))
+        self._account_refresh_timer = QTimer(self)
+        self._account_refresh_timer.setInterval(15_000)
+        self._account_refresh_timer.timeout.connect(self._auto_refresh_account)
+        self._account_refresh_timer.start()
 
     def _build_ui(self):
         root = QVBoxLayout(self)
@@ -91,12 +100,14 @@ class RealtimeStrategyTab(BacktestTab):
             self.cmb_symbol.setCurrentIndex(index)
         self.cmb_interval = QComboBox()
         self.cmb_interval.addItems(INTERVALS)
-        self.cmb_interval.setCurrentText("1m")
+        self.cmb_interval.setCurrentText("1h")
         self.cmb_interval.setMinimumWidth(70)
         self.lbl_latest_value = QLabel(f"{configured} PERP  —")
         self.lbl_latest_value.setStyleSheet("color: #00a99d; font-weight: bold;")
         self.lbl_balance_value = QLabel("—")
         self.lbl_balance_value.setStyleSheet("color: #00a99d;")
+        self.lbl_strategy_capital_value = QLabel("—")
+        self.lbl_strategy_capital_value.setStyleSheet("color: #00a99d;")
         self.lbl_risk_value = QLabel("—")
         self.lbl_risk_value.setStyleSheet("color: #00a99d;")
         self.btn_refresh_account = QPushButton()
@@ -109,9 +120,11 @@ class RealtimeStrategyTab(BacktestTab):
         grid.setColumnStretch(3, 1)
         grid.addWidget(self._label("live_balance_short"), 0, 4)
         grid.addWidget(self.lbl_balance_value, 0, 5)
-        grid.addWidget(self._label("live_risk_rate"), 0, 6)
-        grid.addWidget(self.lbl_risk_value, 0, 7)
-        grid.addWidget(self.btn_refresh_account, 0, 8)
+        grid.addWidget(self._label("live_strategy_capital"), 0, 6)
+        grid.addWidget(self.lbl_strategy_capital_value, 0, 7)
+        grid.addWidget(self._label("live_risk_rate"), 0, 8)
+        grid.addWidget(self.lbl_risk_value, 0, 9)
+        grid.addWidget(self.btn_refresh_account, 0, 10)
 
         # Refresh 右侧：交易控制
         self.btn_start = QPushButton()
@@ -120,8 +133,13 @@ class RealtimeStrategyTab(BacktestTab):
         self._reg(self.btn_close.setText, "live_close_trading")
         self.btn_close.clicked.connect(self._close_all_positions_and_stop)
         self.btn_close.setEnabled(False)
-        grid.addWidget(self.btn_start, 0, 9)
-        grid.addWidget(self.btn_close, 0, 10)
+        self.btn_stop = QPushButton()
+        self._reg(self.btn_stop.setText, "live_stop_trading")
+        self.btn_stop.clicked.connect(self.stop_live)
+        self.btn_stop.setEnabled(False)
+        grid.addWidget(self.btn_start, 0, 11)
+        grid.addWidget(self.btn_close, 0, 12)
+        grid.addWidget(self.btn_stop, 0, 13)
         return box
 
     def _build_live_orders_section(self) -> QGroupBox:
@@ -183,6 +201,7 @@ class RealtimeStrategyTab(BacktestTab):
         self.btn_start.setText(tr("live_start_trading"))
         self.btn_start.setEnabled(not self._running)
         self.btn_close.setEnabled(self._running)
+        self.btn_stop.setEnabled(self._running)
         self.edit_search.setPlaceholderText(tr("search_placeholder"))
         for index, key in enumerate((
             "tab_current_positions", "tab_position_history", "tab_current_orders",
@@ -246,10 +265,19 @@ class RealtimeStrategyTab(BacktestTab):
             klines = gateway.recent_closed_klines(symbol, interval, history_limit)
             if len(klines) < required_bars:
                 raise RuntimeError(tr("realtime_history_empty"))
-            # USDⓈ-M 杠杆参数为整数；信号处理和下单金额使用交易所实际设置值。
-            order.leverage = max(1, int(order.leverage))
-            if not gateway.client.set_leverage(symbol, int(order.leverage)):
-                raise RuntimeError(f"无法设置 {symbol} 杠杆")
+            # 界面杠杆只放大名义下单金额；交易所账户始终使用约定配置。
+            if gateway.client.get_position_mode() is not False:
+                if not gateway.client.set_position_mode(False) \
+                        or gateway.client.get_position_mode() is not False:
+                    raise RuntimeError("无法设置单向持仓模式")
+            if gateway.client.get_multi_assets_mode() is not False:
+                if not gateway.client.set_multi_assets_mode(False) \
+                        or gateway.client.get_multi_assets_mode() is not False:
+                    raise RuntimeError("无法设置单币保证金模式")
+            if not gateway.client.set_cross_margin(symbol):
+                raise RuntimeError(f"无法设置 {symbol} 全仓模式")
+            if not gateway.client.set_leverage(symbol, EXCHANGE_LEVERAGE):
+                raise RuntimeError(f"无法设置 {symbol} {EXCHANGE_LEVERAGE}X 杠杆")
             processor = LiveSignalProcessor(
                 klines, strategy, order, self._record_log,
                 lambda key, **kwargs: i18n().tr_for(i18n().lang, key, **kwargs))
@@ -265,6 +293,11 @@ class RealtimeStrategyTab(BacktestTab):
             self._kline_stream = stream
             self.klines = processor.klines
             self._running = True
+            self._strategy_capital = float(order.total_capital)
+            self._pending_realized_pnl = 0.0
+            self._processed_trade_ids.clear()
+            self._entry_kline_index = None
+            self._update_strategy_capital_label()
             self._log_lines.clear()
             self._page = 0
             self.cmb_symbol.setEnabled(False)
@@ -299,6 +332,11 @@ class RealtimeStrategyTab(BacktestTab):
         self._processor = None
         self._gateway = None
         self._placing_order = False
+        self._strategy_capital = None
+        self._pending_realized_pnl = 0.0
+        self._processed_trade_ids.clear()
+        self._entry_kline_index = None
+        self._update_strategy_capital_label()
         self._close_live_log()
         self.cmb_symbol.setEnabled(True)
         self.cmb_interval.setEnabled(True)
@@ -331,11 +369,24 @@ class RealtimeStrategyTab(BacktestTab):
                     "realtime_position_closed", symbol=item["symbol"],
                     side=item["side"], quantity=f"{item['quantity']:g}"), True)
 
-            failures = summary["failed"]
+            cancel_summary = client.cancel_all_open_orders()
+            failures = summary["failed"] + cancel_summary["failed"]
+            if cancel_summary["remaining_regular"] or cancel_summary["remaining_algo"]:
+                failures.append({
+                    "symbol": "*", "side": "ORDER", "quantity": 0,
+                    "error": "平仓后仍存在未成交委托",
+                })
+            remaining_positions = client.get_positions()
+            if remaining_positions:
+                failures.append({
+                    "symbol": "*", "side": "POSITION", "quantity": 0,
+                    "error": "平仓后仍存在持仓",
+                })
             if failures:
                 detail = "; ".join(
-                    f"{item['symbol']} {item['side']} {item['quantity']:g}: "
-                    f"{item['error']}" for item in failures)
+                    f"{item.get('symbol', '?')} {item.get('side', item.get('kind', ''))} "
+                    f"{item.get('quantity', item.get('order_id', ''))}: "
+                    f"{item.get('error', '操作失败')}" for item in failures)
                 self._record_log(tr(
                     "realtime_close_positions_partial", err=detail), True)
                 QMessageBox.warning(
@@ -393,8 +444,63 @@ class RealtimeStrategyTab(BacktestTab):
         signal = self._processor.add_closed_kline(kline)
         self.klines = self._processor.klines
         self._latest_close = kline.close
+        self._close_on_time_limit(kline.index)
         if signal is not None:
             self._place_signal_order(signal)
+
+    def _close_on_time_limit(self, current_kline: int):
+        """最长持仓到期时按市价平仓，并让本根收盘信号继续生效。"""
+        if self._entry_kline_index is None or self._processor is None \
+                or self._gateway is None:
+            return
+        limit = int(self._processor.order.max_hold_klines)
+        if limit <= 0 or current_kline - self._entry_kline_index + 1 < limit:
+            return
+        symbol = self.cmb_symbol.currentText().strip().upper()
+        client = self._gateway.client
+        positions = client.get_positions(symbol)
+        try:
+            self._placing_order = True
+            for position in positions:
+                amount = float(position.get(
+                    "positionAmt", position.get("quantity", 0)) or 0)
+                if amount == 0:
+                    continue
+                raw_side = str(position.get("positionSide", "")).upper()
+                side = raw_side if raw_side in ("LONG", "SHORT") \
+                    else ("LONG" if amount > 0 else "SHORT")
+                result = client.close_position(symbol, abs(amount), side)
+                if not result or result.get("error"):
+                    raise RuntimeError((result or {}).get(
+                        "error_message", "TIME 市价平仓失败"))
+                order_id = result.get("orderId")
+                if order_id is not None:
+                    final_order = client.get_order_status(symbol, str(order_id))
+                    result = final_order or result
+                    for fill in client.get_trade_fills(symbol, str(order_id)):
+                        fill_key = (str(order_id), str(fill.get("id")))
+                        if fill_key in self._processed_trade_ids:
+                            continue
+                        self._processed_trade_ids.add(fill_key)
+                        self._pending_realized_pnl += float(
+                            fill.get("realizedPnl", 0) or 0)
+                self._insert_order(
+                    result, symbol, "SELL" if side == LONG else "BUY")
+            cancel_summary = client.cancel_all_open_orders(symbol)
+            if cancel_summary["failed"] or cancel_summary["remaining_regular"] \
+                    or cancel_summary["remaining_algo"]:
+                raise RuntimeError("TIME 平仓后保护委托未全部撤销")
+            self._entry_kline_index = None
+            self._reconcile_strategy_capital(symbol)
+            self._record_log(tr(
+                "realtime_time_position_closed", symbol=symbol,
+                kline=current_kline), True)
+        except Exception as exc:  # noqa: BLE001
+            self._record_log(tr("realtime_time_close_failed", err=exc), True)
+            QMessageBox.warning(self, tr("app_title"), tr(
+                "realtime_time_close_failed", err=exc))
+        finally:
+            self._placing_order = False
 
     def _restart_price_stream(self, *_args):
         if self._price_stream is not None:
@@ -435,6 +541,7 @@ class RealtimeStrategyTab(BacktestTab):
             return
         symbol = self.cmb_symbol.currentText().strip().upper()
         try:
+            self._reconcile_strategy_capital(symbol)
             # 保持回测的单持仓语义：账户中该交易对已有仓位时不叠加新首仓。
             has_position = self._gateway.client.has_open_position(symbol)
             if has_position is None:
@@ -449,17 +556,20 @@ class RealtimeStrategyTab(BacktestTab):
             margin_asset, available_balance = self._available_margin_balance(
                 account, symbol)
             reference_price = self._latest_close or signal.kline.close
+            strategy_capital = self._strategy_capital
+            if strategy_capital is None:
+                raise RuntimeError("策略总资金尚未初始化")
             target_notional = base_order_notional(
-                order.total_capital, order.split_count)
+                strategy_capital, order.split_count, order.leverage)
             quantity = self._gateway.normalize_quantity(
                 symbol, target_notional / reference_price)
             actual_notional = quantity * reference_price
             required_margin = required_order_margin(
-                actual_notional, order.leverage, order.fee_rate_pct)
+                actual_notional, EXCHANGE_LEVERAGE, order.fee_rate_pct)
             self._record_log(tr(
                 "realtime_order_margin_check", symbol=symbol,
                 quantity=f"{quantity:g}", notional=f"{actual_notional:.2f}",
-                leverage=f"{order.leverage:g}",
+                leverage=f"{EXCHANGE_LEVERAGE:g}",
                 required=f"{required_margin:.2f}", available=f"{available_balance:.2f}",
                 asset=margin_asset), True)
             if available_balance < required_margin:
@@ -473,6 +583,7 @@ class RealtimeStrategyTab(BacktestTab):
             self._placing_order = True
             result = self._gateway.market_order(
                 symbol, side, quantity, position_side=position_side)
+            self._entry_kline_index = signal.kline.index + 1
             self._insert_order(result, symbol, side)
             order_id = result.get("orderId")
             if order_id is None:
@@ -530,7 +641,7 @@ class RealtimeStrategyTab(BacktestTab):
                 symbol, direction, tp_price=tp_price, sl_price=sl_price)
 
             protection_orders = (
-                (update.get("take_profit_order_id"), "TAKE_PROFIT_MARKET", tp_price, "TP"),
+                (update.get("take_profit_order_id"), "LIMIT", tp_price, "TP"),
                 (update.get("stop_loss_order_id"), "STOP_MARKET", sl_price, "SL"),
             )
             for algo_id, order_type, trigger_price, action_type in protection_orders:
@@ -581,7 +692,7 @@ class RealtimeStrategyTab(BacktestTab):
             if not account:
                 raise RuntimeError("Binance 账户接口未返回数据")
             symbol = self.cmb_symbol.currentText().strip().upper()
-            margin_asset, balance = self._available_margin_balance(
+            margin_asset, balance = self._wallet_balance(
                 account, symbol)
             risk = self._account_risk_ratio(account)
             if risk is None:
@@ -601,6 +712,12 @@ class RealtimeStrategyTab(BacktestTab):
         except Exception as exc:  # noqa: BLE001
             if show_errors:
                 QMessageBox.warning(self, tr("app_title"), tr("live_error", err=exc))
+
+    def _auto_refresh_account(self):
+        if self._running:
+            self._refresh_account(show_errors=False)
+            symbol = self.cmb_symbol.currentText().strip().upper()
+            self._reconcile_strategy_capital(symbol)
 
     @staticmethod
     def _account_risk_ratio(account: dict):
@@ -638,6 +755,21 @@ class RealtimeStrategyTab(BacktestTab):
         ), {})
         return asset_name, float(asset.get("availableBalance", 0) or 0)
 
+    @classmethod
+    def _wallet_balance(cls, account: dict, symbol: str):
+        """返回所选合约保证金币种的 Wallet Balance。"""
+        asset_name = cls._margin_asset_for_symbol(symbol)
+        asset = next((
+            row for row in account.get("assets", [])
+            if str(row.get("asset", "")).upper() == asset_name
+        ), {})
+        return asset_name, float(asset.get("walletBalance", 0) or 0)
+
+    def _update_strategy_capital_label(self):
+        value = self._strategy_capital
+        self.lbl_strategy_capital_value.setText(
+            "—" if value is None else f"{value:,.2f}")
+
     def _insert_order(self, order: dict, symbol: str, side: str):
         order_id = order.get("orderId")
         if order_id is None:
@@ -653,10 +785,50 @@ class RealtimeStrategyTab(BacktestTab):
             if newly_filled:
                 balance = self._number_from_label(self.lbl_balance_value.text())
                 self._db.record_filled_trade(order, balance_after=balance)
+            self._apply_realized_pnl_if_position_closed(order)
             self._refresh_record_tables()
         except Exception as exc:  # noqa: BLE001
             get_logger().exception("保存订单状态失败")
             self._record_log(tr("db_write_error", err=exc), False)
+
+    def _apply_realized_pnl_if_position_closed(self, order: dict):
+        """完整平仓后把本轮实际已实现盈亏计入策略总资金。"""
+        if not self._running or self._strategy_capital is None \
+                or self._gateway is None:
+            return
+        execution_type = str(order.get("x", order.get("executionType", ""))).upper()
+        trade_id = order.get("t", order.get("tradeId"))
+        order_id = order.get("i", order.get("orderId"))
+        event_key = (str(order_id), str(trade_id))
+        if execution_type == "TRADE" and event_key not in self._processed_trade_ids:
+            self._processed_trade_ids.add(event_key)
+            try:
+                self._pending_realized_pnl += float(
+                    order.get("rp", order.get("realizedPnl", 0)) or 0)
+            except (TypeError, ValueError):
+                pass
+        symbol = str(order.get("s", order.get("symbol", ""))).upper()
+        if not symbol or self._pending_realized_pnl == 0:
+            return
+        self._reconcile_strategy_capital(symbol)
+
+    def _reconcile_strategy_capital(self, symbol: str):
+        if not symbol or self._pending_realized_pnl == 0 \
+                or self._gateway is None or self._strategy_capital is None:
+            return
+        has_position = self._gateway.client.has_open_position(symbol)
+        if has_position is not False:
+            return
+        pnl = self._pending_realized_pnl
+        self._strategy_capital += pnl
+        self._pending_realized_pnl = 0.0
+        self._entry_kline_index = None
+        self._update_strategy_capital_label()
+        # 完全平仓后撤掉另一侧仍存活的 TP/SL，避免旧保护单遗留。
+        self._gateway.client.cancel_all_open_orders(symbol)
+        self._record_log(tr(
+            "realtime_strategy_capital_updated", pnl=f"{pnl:+.2f}",
+            capital=f"{self._strategy_capital:.2f}"), True)
 
     @staticmethod
     def _number_from_label(text: str):

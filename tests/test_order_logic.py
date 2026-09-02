@@ -28,7 +28,7 @@ class OrderLogicTests(unittest.TestCase):
     def test_default_leverage_is_one_hundred(self):
         self.assertEqual(OrderParams().leverage, 100.0)
 
-    def test_order_amount_uses_capital_and_split_count_not_leverage(self):
+    def test_order_amount_uses_capital_split_count_and_leverage_multiplier(self):
         engine = BacktestEngine(
             [], signal_params(),
             OrderParams(total_capital=100000, split_count=5, leverage=6),
@@ -36,8 +36,19 @@ class OrderLogicTests(unittest.TestCase):
 
         position = engine._new_position(LONG, 1, 100)
 
-        self.assertEqual(position.cost, 20000)
-        self.assertEqual(position.qty, 200)
+        self.assertEqual(position.cost, 120000)
+        self.assertEqual(position.qty, 1200)
+
+    def test_documented_position_size_example(self):
+        engine = BacktestEngine(
+            [], signal_params(),
+            OrderParams(total_capital=1000, split_count=10, leverage=5),
+        )
+
+        position = engine._new_position(LONG, 1, 78000)
+
+        self.assertEqual(position.cost, 500)
+        self.assertAlmostEqual(position.qty, 500 / 78000)
 
     def test_one_hundred_x_reduces_margin_without_increasing_notional(self):
         notional = base_order_notional(100, 1)
@@ -48,7 +59,7 @@ class OrderLogicTests(unittest.TestCase):
         self.assertAlmostEqual(required, 1.035)
 
     def test_next_order_uses_capital_remaining_after_close(self):
-        cases = (("SL", 90, 98000, 19600), ("TP", 110, 102000, 20400))
+        cases = (("SL", 90, 88000, 105600), ("TP", 110, 112000, 134400))
         for exit_type, exit_price, capital, next_amount in cases:
             with self.subTest(exit_type=exit_type):
                 engine = BacktestEngine(
@@ -61,9 +72,28 @@ class OrderLogicTests(unittest.TestCase):
                 engine._close_trade(first, 2, exit_price, exit_type)
                 second = engine._new_position(LONG, 3, 100)
 
-                self.assertEqual(first.cost, 20000)
+                self.assertEqual(first.cost, 120000)
                 self.assertEqual(engine.current_capital, capital)
                 self.assertEqual(second.cost, next_amount)
+
+    def test_exit_kline_is_scanned_and_signal_enters_on_next_open(self):
+        ks = [
+            kline(1, 90, 91, 89, 90),
+            kline(2, 90, 101, 89, 100),   # signal; first entry on #3
+            kline(3, 100, 111, 94, 110),  # SL and a valid LONG signal
+            kline(4, 123, 124, 122, 123), # re-entry must happen here
+            kline(5, 123, 124, 122, 123),
+        ]
+        trades = BacktestEngine(
+            ks, signal_params(),
+            OrderParams(leverage=1, fee_rate_pct=0, stop_loss=5,
+                        take_profit=0, stop_cooldown=10),
+        ).run()
+
+        self.assertEqual(len(trades), 2)
+        self.assertEqual(trades[0].exit_type, "SL")
+        self.assertEqual(trades[0].exit_kline, 3)
+        self.assertEqual(trades[1].entry_kline, 4)
 
     def test_add_then_stop_then_take_profit_priority_on_entry_kline(self):
         logs = []

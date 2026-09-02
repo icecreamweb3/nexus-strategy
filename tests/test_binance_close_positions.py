@@ -69,3 +69,42 @@ def test_close_all_positions_continues_after_one_position_fails():
         "quantity": 0.001,
         "error": "rejected",
     }]
+
+
+def test_cancel_all_open_orders_cancels_regular_and_algo_then_confirms():
+    class FakeOrderClient:
+        def __init__(self):
+            self.regular_reads = 0
+            self.algo_reads = 0
+            self.calls = []
+
+        def get_open_orders(self, symbol=None):
+            self.regular_reads += 1
+            return ([{"symbol": "BTCUSDT", "orderId": 11}]
+                    if self.regular_reads == 1 else [])
+
+        def get_all_algo_orders(self, symbol=None):
+            self.algo_reads += 1
+            return ([{"symbol": "BTCUSDT", "algoId": 22}]
+                    if self.algo_reads == 1 else [])
+
+        def cancel_order(self, symbol, order_id):
+            self.calls.append(("regular", symbol, order_id))
+            return {"orderId": int(order_id), "status": "CANCELED"}
+
+        def cancel_algo_order(self, **kwargs):
+            self.calls.append(("algo", kwargs["symbol"], kwargs["algo_id"]))
+            return {"algoId": kwargs["algo_id"], "status": "CANCELED"}
+
+    client = FakeOrderClient()
+
+    summary = BinanceClient.cancel_all_open_orders(client, "BTCUSDT")
+
+    assert client.calls == [
+        ("regular", "BTCUSDT", "11"),
+        ("algo", "BTCUSDT", 22),
+    ]
+    assert len(summary["canceled"]) == 2
+    assert summary["failed"] == []
+    assert summary["remaining_regular"] == []
+    assert summary["remaining_algo"] == []

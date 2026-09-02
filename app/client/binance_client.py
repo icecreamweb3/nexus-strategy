@@ -834,13 +834,26 @@ class BinanceClient:
             return {}
 
     def get_account_balance(self, asset: str = "USDT") -> float:
-        """Return available balance for *asset* in the futures wallet."""
+        """Return wallet balance for *asset* in the futures wallet."""
         info = self.get_account_info()
         assets = info.get("assets", [])
         for entry in assets:
             if entry.get("asset", "").upper() == asset.upper():
-                return float(entry.get("availableBalance", 0.0))
+                return float(entry.get("walletBalance", 0.0))
         return 0.0
+
+    def set_cross_margin(self, symbol: str) -> bool:
+        """Ensure the symbol uses crossed margin."""
+        try:
+            self.client.futures_change_margin_type(
+                symbol=symbol.upper(), marginType="CROSSED")
+            return True
+        except Exception as exc:
+            # Binance code -4046 means the requested margin type is already set.
+            if getattr(exc, "code", None) == -4046 or "No need to change" in str(exc):
+                return True
+            logger.debug(f"Failed to set crossed margin for {symbol}: {exc}")
+            return False
 
     def set_leverage(self, symbol: str, leverage: int) -> bool:
         """Set leverage for a symbol"""
@@ -869,6 +882,8 @@ class BinanceClient:
             self.client.futures_change_position_mode(dualSidePosition=hedge_mode)
             return True
         except Exception as e:
+            if getattr(e, "code", None) == -4059 or "No need to change" in str(e):
+                return True
             logger.debug(f"Failed to set position mode: {e}")
             return False
 
@@ -888,6 +903,8 @@ class BinanceClient:
             self.client.futures_change_multi_assets_mode(multiAssetsMargin=multi_assets_mode)
             return True
         except Exception as e:
+            if "No need to change" in str(e):
+                return True
             logger.debug(f"Failed to set multi assets mode: {e}")
             return False
     
@@ -2843,7 +2860,7 @@ class BinanceClient:
             logger.warning(f"Failed to check open position for {symbol}: {e}")
             return None
     
-    def get_open_orders(self, symbol: str) -> List[dict]:
+    def get_open_orders(self, symbol: str | None = None) -> List[dict]:
         """Get all open orders for a symbol
         
         Args:
@@ -2859,7 +2876,8 @@ class BinanceClient:
             - status: Order status (NEW, PARTIALLY_FILLED, etc.)
         """
         try:
-            orders = self.client.futures_get_open_orders(symbol=symbol)
+            params = {"symbol": symbol} if symbol else {}
+            orders = self.client.futures_get_open_orders(**params)
             return orders if orders else []
         except Exception as e:
             logger.debug(f"Failed to get open orders for {symbol}: {e}")
@@ -3199,6 +3217,48 @@ class BinanceClient:
                     'error': str(exc),
                 })
         return {'closed': closed, 'failed': failed}
+
+    def cancel_all_open_orders(self, symbol: str | None = None) -> dict:
+        """Cancel regular and algo futures orders, optionally for one symbol."""
+        canceled = []
+        failed = []
+        regular_orders = self.get_open_orders(symbol)
+        for order in regular_orders:
+            symbol = str(order.get("symbol", "")).upper()
+            order_id = order.get("orderId")
+            result = self.cancel_order(symbol, str(order_id)) \
+                if symbol and order_id is not None else None
+            if result and not result.get("error"):
+                canceled.append({"kind": "regular", "symbol": symbol,
+                                 "order_id": str(order_id)})
+            else:
+                failed.append({"kind": "regular", "symbol": symbol,
+                               "order_id": str(order_id), "error":
+                               (result or {}).get("error_message", "撤单失败")})
+
+        algo_orders = self.get_all_algo_orders(symbol)
+        for order in algo_orders:
+            symbol = str(order.get("symbol", "")).upper()
+            algo_id = order.get("algoId")
+            client_algo_id = order.get("clientAlgoId")
+            result = self.cancel_algo_order(
+                algo_id=int(algo_id) if algo_id is not None else None,
+                client_algo_id=None if algo_id is not None else client_algo_id,
+                symbol=symbol or None)
+            if result and not result.get("error"):
+                canceled.append({"kind": "algo", "symbol": symbol,
+                                 "order_id": str(algo_id or client_algo_id)})
+            else:
+                failed.append({"kind": "algo", "symbol": symbol,
+                               "order_id": str(algo_id or client_algo_id),
+                               "error": (result or {}).get(
+                                   "error_message", "撤销条件单失败")})
+
+        remaining_regular = self.get_open_orders(symbol)
+        remaining_algo = self.get_all_algo_orders(symbol)
+        return {"canceled": canceled, "failed": failed,
+                "remaining_regular": remaining_regular,
+                "remaining_algo": remaining_algo}
     
     def get_account_margin_ratio(self) -> Optional[float]:
         """Calculate Account Margin Ratio = Account Maintenance Margin / Account Equity"""

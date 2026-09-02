@@ -15,11 +15,12 @@ LONG = "LONG"
 SHORT = "SHORT"
 
 
-def base_order_notional(capital: float, split_count: int) -> float:
-    """按资金和拆分份数计算名义下单金额；杠杆不改变下单金额。"""
-    if split_count <= 0 or capital <= 0:
+def base_order_notional(capital: float, split_count: int,
+                        leverage_multiplier: float = 1.0) -> float:
+    """按策略资金、拆分份数和下单倍数计算名义下单金额。"""
+    if split_count <= 0 or capital <= 0 or leverage_multiplier <= 0:
         return 0.0
-    return capital / split_count
+    return capital / split_count * leverage_multiplier
 
 
 def required_order_margin(notional: float, leverage: float,
@@ -505,8 +506,9 @@ class BacktestEngine:
     # ---------------- 成交与平仓 ----------------
 
     def _base_order_amount(self) -> float:
-        """按最新总资金和拆分份数计算本次名义下单金额。"""
-        return base_order_notional(self.current_capital, self.op.split_count)
+        """按最新策略总资金、拆分份数和倍数计算本次名义金额。"""
+        return base_order_notional(
+            self.current_capital, self.op.split_count, self.op.leverage)
 
     def _new_position(self, side: str, entry_kline: int, price: float) -> _Position:
         initial_amount = self._base_order_amount()
@@ -585,7 +587,8 @@ class BacktestEngine:
             if self.cancelled:
                 break
 
-            # 持仓或等待开仓时不运行信号策略，日志中的策略状态记为未通过。
+            # 持仓或等待开仓时不预先运行信号策略。若本根发生平仓，
+            # 会在完整 OHLCV 已知后于下方重新检测这根 K 线。
             can_scan = position is None and entry_signal is None \
                 and k.index > cooldown_until
             bar_signal = self._combined_signal(i) if can_scan else None
@@ -632,7 +635,12 @@ class BacktestEngine:
                     position = None
                 if position is not None:
                     continue
-                # 平仓后同根K线不再开仓
+                # TP / SL / TIMEOUT 的平仓 K 线仍参与信号判断；信号只会
+                # 安排到下一根连续 K 线开盘成交，不会在本根重新开仓。
+                sig = self._combined_signal(i)
+                if sig is not None and (op.direction == "BOTH" or sig == op.direction):
+                    entry_signal = (sig, k.index)
+                    self._log(self._tr("log_signal", side=sig, kline=k.index))
                 continue
 
             # 1、17. 仅空仓时寻找信号；平仓当根已在上方 continue。

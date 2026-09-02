@@ -32,6 +32,19 @@ def test_multi_asset_balance_uses_account_available_balance():
         account, "BTCUSDT") == ("USDT", 42.25)
 
 
+def test_displayed_account_balance_uses_wallet_balance():
+    account = {
+        "availableBalance": "42.25",
+        "assets": [{
+            "asset": "USDT", "availableBalance": "40",
+            "walletBalance": "123.45",
+        }],
+    }
+
+    assert RealtimeStrategyTab._wallet_balance(
+        account, "BTCUSDT") == ("USDT", 123.45)
+
+
 def test_live_price_calculates_long_unrealized_pnl():
     position = {
         "position_side": "LONG",

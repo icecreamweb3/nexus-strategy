@@ -110,9 +110,9 @@ class BinanceWebsocketTests(unittest.TestCase):
                 self.stop_loss = kwargs
                 return {"algoId": 501, "clientAlgoId": "sl-501"}
 
-            def place_take_profit_order(self, **kwargs):
+            def place_take_profit_limit_order(self, **kwargs):
                 self.take_profit = kwargs
-                return {"algoId": 502, "clientAlgoId": "tp-502"}
+                return {"orderId": 502, "clientOrderId": "tp-502"}
 
         client = Client()
         completed = []
@@ -137,6 +137,7 @@ class BinanceWebsocketTests(unittest.TestCase):
 
         self.assertEqual(client.stop_loss["stop_price"], 99)
         self.assertEqual(client.take_profit["price"], 102)
+        self.assertEqual(client.take_profit["stop_price"], 102)
         self.assertEqual(completed[0]["stop_loss_order_id"], 501)
         self.assertEqual(completed[0]["take_profit_order_id"], 502)
         self.assertEqual(completed[0]["stop_loss_price"], 99)
