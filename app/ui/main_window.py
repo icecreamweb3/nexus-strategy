@@ -1,6 +1,7 @@
 """主窗口 / Main window: Tab + 语言切换菜单."""
-from PyQt5.QtWidgets import QAction, QMainWindow, QTabWidget
+from PyQt5.QtWidgets import QAction, QLabel, QMainWindow, QTabWidget
 
+from app.build_info import APP_VERSION, get_build_time
 from app.i18n import EN, ZH, i18n, tr
 from app.ui.realtime_tab import RealtimeStrategyTab
 
@@ -23,6 +24,10 @@ class MainWindow(QMainWindow):
         self.menu_lang.addAction(self.action_zh)
         self.menu_lang.addAction(self.action_en)
 
+        self.lbl_build_info = QLabel()
+        self.lbl_build_info.setContentsMargins(8, 0, 8, 0)
+        self.statusBar().addPermanentWidget(self.lbl_build_info)
+
         i18n().language_changed.connect(self.retranslate)
         self.retranslate()
 
@@ -36,7 +41,10 @@ class MainWindow(QMainWindow):
         self.action_zh.setText(tr("lang_zh"))
         self.action_en.setText(tr("lang_en"))
         self.backtest_tab.retranslate()
-        self.statusBar().showMessage(tr("version_info"))
+        self.statusBar().clearMessage()
+        self.lbl_build_info.setText(tr(
+            "version_build_info", version=APP_VERSION,
+            build_time=get_build_time()))
 
     def closeEvent(self, event):
         self.backtest_tab.close_listener()

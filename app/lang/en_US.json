@@ -142,6 +142,7 @@
   "search_placeholder": "Search log keywords...",
   "page_size": "Page Size",
   "version_info": "Version: v1.0.0",
+  "version_build_info": "Version: {version}  |  Build Time: {build_time}",
 
   "backtest_running": "Backtest running...",
   "backtest_done": "Backtest done: {trades} trades, total PnL {pnl}",

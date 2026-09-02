@@ -2,15 +2,21 @@
 """在 Windows 上使用 PyInstaller 打包 Nexus Strategy Live。"""
 import argparse
 import importlib.util
+import json
 import os
 import shutil
 import struct
 import subprocess
 import sys
+import tempfile
+from datetime import datetime, timezone
 from pathlib import Path
 
-
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(PROJECT_ROOT))
+from app.build_info import APP_VERSION  # noqa: E402
+
+
 DIST_DIR = PROJECT_ROOT / "dist"
 REQUIRED_MODULES = {
     "PyInstaller": "pyinstaller",
@@ -54,6 +60,13 @@ def main() -> int:
         return 2
 
     data_separator = os.pathsep
+    build_time = datetime.now(timezone.utc).astimezone().strftime(
+        "%Y-%m-%d %H:%M:%S %Z")
+    metadata_file = Path(tempfile.gettempdir()) / "nexus_strategy_build_info.json"
+    metadata_file.write_text(json.dumps({
+        "version": APP_VERSION,
+        "build_time": build_time,
+    }, ensure_ascii=False), encoding="utf-8")
     command = [
         sys.executable,
         "-m",
@@ -70,6 +83,8 @@ def main() -> int:
         str(PROJECT_ROOT),
         "--add-data",
         f"{PROJECT_ROOT / 'app' / 'lang'}{data_separator}app/lang",
+        "--add-data",
+        f"{metadata_file}{data_separator}.",
         # 显式收集全部运行依赖、Qt插件、子模块、数据文件和包元数据。
         "--collect-all", "PyQt5",
         "--collect-all", "openpyxl",
@@ -103,7 +118,10 @@ def main() -> int:
     command.append(str(PROJECT_ROOT / "main.py"))
 
     print("正在构建 Windows 可执行文件……")
-    subprocess.run(command, cwd=PROJECT_ROOT, check=True)
+    try:
+        subprocess.run(command, cwd=PROJECT_ROOT, check=True)
+    finally:
+        metadata_file.unlink(missing_ok=True)
 
     output_dir = DIST_DIR / args.name if args.onedir else DIST_DIR
     env_example = PROJECT_ROOT / ".env.example"
@@ -115,6 +133,7 @@ def main() -> int:
 
     executable = output_dir / f"{args.name}.exe"
     print(f"构建完成：{executable}")
+    print(f"版本：{APP_VERSION}，Build Time：{build_time}")
     print("Live运行依赖（PyQt5、Binance、WebSocket、SQLite及证书）已包含。")
     print("目标电脑无需安装Python或pip依赖。")
     print("请将 .env.example 复制为 .env 并填写 Binance API 配置。")

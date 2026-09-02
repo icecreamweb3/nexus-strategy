@@ -141,6 +141,7 @@
   "search_placeholder": "输入关键词搜索日志...",
   "page_size": "页面大小",
   "version_info": "版本： v1.0.0",
+  "version_build_info": "版本：{version}  |  Build Time：{build_time}",
 
   "backtest_running": "回测运行中...",
   "backtest_done": "回测完成：共 {trades} 笔交易，总盈亏 {pnl}",
