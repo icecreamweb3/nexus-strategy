@@ -112,7 +112,10 @@ class RealtimeStrategyTab(BacktestTab):
         self.lbl_risk_value.setStyleSheet("color: #00a99d;")
         self.btn_refresh_account = QPushButton()
         self._reg(self.btn_refresh_account.setText, "live_refresh")
-        self.btn_refresh_account.clicked.connect(self._refresh_account)
+        self.btn_refresh_account.clicked.connect(lambda: self._refresh_account())
+        self.btn_sync_account = QPushButton()
+        self._reg(self.btn_sync_account.setText, "live_sync")
+        self.btn_sync_account.clicked.connect(lambda: self._sync_account_records())
 
         grid.addWidget(self.cmb_symbol, 0, 0)
         grid.addWidget(self.cmb_interval, 0, 1)
@@ -125,6 +128,7 @@ class RealtimeStrategyTab(BacktestTab):
         grid.addWidget(self._label("live_risk_rate"), 0, 8)
         grid.addWidget(self.lbl_risk_value, 0, 9)
         grid.addWidget(self.btn_refresh_account, 0, 10)
+        grid.addWidget(self.btn_sync_account, 0, 11)
 
         # Refresh 右侧：交易控制
         self.btn_start = QPushButton()
@@ -137,9 +141,9 @@ class RealtimeStrategyTab(BacktestTab):
         self._reg(self.btn_stop.setText, "live_stop_trading")
         self.btn_stop.clicked.connect(self.stop_live)
         self.btn_stop.setEnabled(False)
-        grid.addWidget(self.btn_start, 0, 11)
-        grid.addWidget(self.btn_close, 0, 12)
-        grid.addWidget(self.btn_stop, 0, 13)
+        grid.addWidget(self.btn_start, 0, 12)
+        grid.addWidget(self.btn_close, 0, 13)
+        grid.addWidget(self.btn_stop, 0, 14)
         return box
 
     def _build_live_orders_section(self) -> QGroupBox:
@@ -678,8 +682,9 @@ class RealtimeStrategyTab(BacktestTab):
             get_logger().exception("保存 TP/SL 保护单失败")
             self._record_log(tr("realtime_protection_failed", err=exc), True)
 
-    def _refresh_account(self, show_errors: bool = True):
-        """刷新余额和账户风险率。"""
+    def _refresh_account(self, show_errors: bool = True,
+                         sync_history: bool = False):
+        """刷新账户；sync_history=True 时同时用 userTrades 校准历史。"""
         try:
             client = self._gateway.client if self._gateway is not None else None
             if client is None:
@@ -707,11 +712,25 @@ class RealtimeStrategyTab(BacktestTab):
                 if newly_filled:
                     self._db.record_filled_trade(
                         remote_order, balance_after=balance)
-            self._db.sync_positions(client.get_positions())
+            if sync_history:
+                self._sync_user_trades(symbol, client=client, refresh=False)
+            else:
+                self._db.sync_positions(client.get_positions())
             self._refresh_record_tables()
+            return True
         except Exception as exc:  # noqa: BLE001
             if show_errors:
                 QMessageBox.warning(self, tr("app_title"), tr("live_error", err=exc))
+            return False
+
+    def _sync_account_records(self):
+        """手工从 Binance 强制校准订单、当前仓位和历史仓位。"""
+        self.btn_sync_account.setEnabled(False)
+        try:
+            if self._refresh_account(show_errors=True, sync_history=True):
+                self._record_log(tr("realtime_sync_completed"), True)
+        finally:
+            self.btn_sync_account.setEnabled(True)
 
     def _auto_refresh_account(self):
         if self._running:
@@ -781,15 +800,60 @@ class RealtimeStrategyTab(BacktestTab):
 
     def _on_order_update(self, order: dict):
         try:
-            _, newly_filled = self._db.upsert_order(order)
+            values, newly_filled = self._db.upsert_order(order)
             if newly_filled:
                 balance = self._number_from_label(self.lbl_balance_value.text())
                 self._db.record_filled_trade(order, balance_after=balance)
+            if self._is_close_trade_event(order, values):
+                self._sync_user_trades(values["symbol"])
             self._apply_realized_pnl_if_position_closed(order)
             self._refresh_record_tables()
         except Exception as exc:  # noqa: BLE001
             get_logger().exception("保存订单状态失败")
             self._record_log(tr("db_write_error", err=exc), False)
+
+    @staticmethod
+    def _is_close_trade_event(order: dict, values: dict) -> bool:
+        """识别 WebSocket 中实际减少/关闭仓位的成交事件。"""
+        execution_type = str(order.get(
+            "x", order.get("executionType", ""))).upper()
+        if execution_type != "TRADE":
+            return False
+        try:
+            realized_pnl = abs(float(order.get(
+                "rp", order.get("realizedPnl", 0)) or 0))
+        except (TypeError, ValueError):
+            realized_pnl = 0.0
+        return bool(values.get("reduce_only")) \
+            or values.get("action_type") in ("TP", "SL") \
+            or bool(order.get("cp", order.get("closePosition", False))) \
+            or realized_pnl > 0
+
+    def _sync_user_trades(self, symbol: str, client=None,
+                          refresh: bool = True) -> int:
+        """查询真实成交并幂等更新订单详情和 position_history。"""
+        if not symbol:
+            return 0
+        if client is None:
+            client = self._gateway.client if self._gateway is not None else None
+        if client is None:
+            config = load_config()
+            if not config.has_credentials:
+                raise RuntimeError(tr("live_no_credentials"))
+            client = BinanceLiveGateway(config).client
+        user_trades = client.get_user_trades(
+            symbol=symbol, limit=1000, raise_on_error=True) or []
+        completed = self._db.sync_user_trades(user_trades)
+        has_position = client.has_open_position(symbol)
+        if has_position is None:
+            raise RuntimeError(f"无法确认 {symbol} 当前持仓，已保留本地记录")
+        positions = client.get_positions(symbol) if has_position else []
+        if has_position and not positions:
+            raise RuntimeError(f"{symbol} 持仓查询结果不完整，已保留本地记录")
+        self._db.sync_positions(positions, symbols=(symbol,))
+        if refresh:
+            self._refresh_record_tables()
+        return completed
 
     def _apply_realized_pnl_if_position_closed(self, order: dict):
         """完整平仓后把本轮实际已实现盈亏计入策略总资金。"""

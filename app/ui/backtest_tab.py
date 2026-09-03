@@ -87,6 +87,7 @@ class BacktestTab(QWidget):
         self._retr = []        # [(setter_callable, key)] 用于语言切换
         self._build_ui()
         self.retranslate()
+        self._load_saved_default_params(show_errors=False)
 
     # ---------- i18n helpers ----------
 
@@ -141,6 +142,9 @@ class BacktestTab(QWidget):
         self.btn_reset_params = QPushButton()
         self._reg(self.btn_reset_params.setText, "reset_params")
         self.btn_reset_params.clicked.connect(self._reset_params)
+        self.btn_save_default_params = QPushButton()
+        self._reg(self.btn_save_default_params.setText, "save_default_params")
+        self.btn_save_default_params.clicked.connect(self._save_default_params)
         self.btn_export_params = QPushButton()
         self._reg(self.btn_export_params.setText, "export_params")
         self.btn_export_params.clicked.connect(self._export_params)
@@ -150,6 +154,7 @@ class BacktestTab(QWidget):
         toolbar = QHBoxLayout()
         toolbar.addStretch(1)
         toolbar.addWidget(self.btn_reset_params)
+        toolbar.addWidget(self.btn_save_default_params)
         toolbar.addWidget(self.btn_import_params)
         toolbar.addWidget(self.btn_export_params)
 
@@ -479,9 +484,13 @@ class BacktestTab(QWidget):
     # ---------- 参数收集 ----------
 
     def _reset_params(self):
-        """恢复 StrategyParams / OrderParams 的界面默认值。"""
-        sp = StrategyParams()
-        op = OrderParams()
+        """优先恢复用户保存的默认参数，否则使用程序内置默认值。"""
+        if self._load_saved_default_params(show_errors=True):
+            return
+        self._apply_params(StrategyParams(), OrderParams())
+
+    def _apply_params(self, sp: StrategyParams, op: OrderParams):
+        """把完整参数模型应用到界面控件。"""
         self.chk_volume.setChecked(sp.volume_enabled)
         self.sp_volume_prev_n.setValue(sp.volume_prev_n)
         self.sp_volume_mult.setValue(sp.volume_mult)
@@ -513,6 +522,37 @@ class BacktestTab(QWidget):
         self.sp_add_mult.setValue(op.add_mult)
         self.sp_add_count.setValue(op.add_count)
         self.sp_max_hold.setValue(op.max_hold_klines)
+
+    @staticmethod
+    def _default_params_path() -> str:
+        return os.path.join(APP_DIR, "data", "nexus_strategy_defaults.inf")
+
+    def _load_saved_default_params(self, show_errors: bool = False) -> bool:
+        path = self._default_params_path()
+        if not os.path.isfile(path):
+            return False
+        try:
+            strategy, order = load_params(path)
+            self._apply_params(strategy, order)
+            return True
+        except (OSError, ParamsFileError) as exc:
+            get_logger().warning("加载默认参数失败: %s", exc)
+            if show_errors:
+                QMessageBox.warning(
+                    self, tr("app_title"), tr("err_params_file", err=exc))
+            return False
+
+    def _save_default_params(self):
+        path = self._default_params_path()
+        strategy, order = self._collect_params()
+        try:
+            save_params(path, strategy, order)
+        except OSError as exc:
+            QMessageBox.warning(
+                self, tr("app_title"), tr("err_params_file", err=exc))
+            return
+        QMessageBox.information(
+            self, tr("app_title"), tr("default_params_saved", path=path))
 
     def _collect_params(self):
         sp = StrategyParams(
@@ -584,36 +624,7 @@ class BacktestTab(QWidget):
         except (OSError, ParamsFileError) as exc:
             QMessageBox.warning(self, tr("app_title"), tr("err_params_file", err=exc))
             return
-        self.chk_volume.setChecked(sp.volume_enabled)
-        self.sp_volume_prev_n.setValue(sp.volume_prev_n)
-        self.sp_volume_mult.setValue(sp.volume_mult)
-        self.chk_single.setChecked(sp.single_change_enabled)
-        self.sp_single_pct.setValue(sp.single_change_pct)
-        self.sp_single_max_pct.setValue(sp.single_change_max_pct)
-        self.chk_consec.setChecked(sp.consecutive_enabled)
-        self.sp_consec_count.setValue(sp.consecutive_count)
-        self.chk_cum.setChecked(sp.cum_change_enabled)
-        self.sp_cum_klines.setValue(sp.cum_klines)
-        self.sp_cum_pct.setValue(sp.cum_change_pct)
-        self.chk_atr.setChecked(sp.atr_enabled)
-        self.sp_atr_period.setValue(sp.atr_period)
-        self.sp_atr_min.setValue(sp.atr_min_pct)
-        self.sp_atr_max.setValue(sp.atr_max_pct)
-        self.chk_shadow.setChecked(sp.shadow_body_enabled)
-        self.sp_shadow_upper.setValue(sp.shadow_body_upper)
-        self.sp_shadow_lower.setValue(sp.shadow_body_lower)
-        self.sp_total_capital.setValue(op.total_capital)
-        self.sp_split_count.setValue(op.split_count)
-        self.sp_leverage.setValue(op.leverage)
-        self.sp_fee.setValue(op.fee_rate_pct)
-        self.sp_stop_loss.setValue(op.stop_loss)
-        self.sp_cooldown.setValue(op.stop_cooldown)
-        self.sp_take_profit.setValue(op.take_profit)
-        self.cmb_direction.setCurrentIndex(("BOTH", "LONG", "SHORT").index(op.direction))
-        self.sp_add_interval.setValue(op.add_interval_pct)
-        self.sp_add_mult.setValue(op.add_mult)
-        self.sp_add_count.setValue(op.add_count)
-        self.sp_max_hold.setValue(op.max_hold_klines)
+        self._apply_params(sp, op)
         QMessageBox.information(self, tr("app_title"), tr("params_imported", path=path))
 
     # ---------- 回测执行 ----------

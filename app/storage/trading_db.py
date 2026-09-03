@@ -238,9 +238,20 @@ class TradingDatabase:
             f"{name}=excluded.{name}" for name in columns if name != "order_id")
         with self._connect() as connection:
             previous = connection.execute(
-                "SELECT status FROM orders WHERE exchange='binance' AND order_id=?",
+                "SELECT status, action_type, use_type, trade_direction, reduce_only "
+                "FROM orders WHERE exchange='binance' AND order_id=?",
                 (values["order_id"],),
             ).fetchone()
+            # Binance's regular LIMIT TP update has no semantic TP marker. Keep
+            # the classification saved when the protection order was created.
+            if previous is not None:
+                if previous["action_type"] in ("TP", "SL", "DCA") \
+                        and values["action_type"] == "OPEN":
+                    values["action_type"] = previous["action_type"]
+                    values["use_type"] = previous["use_type"]
+                    values["trade_direction"] = previous["trade_direction"]
+                if previous["reduce_only"]:
+                    values["reduce_only"] = 1
             connection.execute(
                 f"INSERT INTO orders ({', '.join(columns)}) VALUES ({placeholders}) "
                 f"ON CONFLICT(exchange, order_id) WHERE order_id IS NOT NULL "
@@ -255,19 +266,35 @@ class TradingDatabase:
         values = self._order_values(order)
         if values["status"] != "FILLED" or not values["order_id"]:
             return None
-        direction = values["trade_direction"]
-        action = values["action_type"]
-        trade_type = {
-            "DCA": "DCA", "TP": "TAKE_PROFIT", "SL": "STOP_LOSS",
-        }.get(action, "OPEN")
-        price = values["avg_price"] or values["price"]
-        quantity = values["filled_qty"] or values["quantity"]
         with self._connect() as connection:
+            stored_order = connection.execute(
+                "SELECT action_type, trade_direction FROM orders "
+                "WHERE exchange='binance' AND order_id=?",
+                (values["order_id"],),
+            ).fetchone()
+            if stored_order is not None:
+                values["action_type"] = stored_order["action_type"]
+                values["trade_direction"] = stored_order["trade_direction"]
+            direction = values["trade_direction"]
+            action = values["action_type"]
+            trade_type = {
+                "DCA": "DCA", "TP": "TAKE_PROFIT", "SL": "STOP_LOSS",
+            }.get(action, "OPEN")
+            price = values["avg_price"] or values["price"]
+            quantity = values["filled_qty"] or values["quantity"]
             linked = connection.execute(
                 "SELECT trade_id FROM order_trade_links WHERE order_id=?",
                 (values["order_id"],),
             ).fetchone()
             if linked:
+                connection.execute(
+                    "UPDATE trades SET price=?, quantity=?, cost=?, fee=?, "
+                    "realized_pnl=?, balance_after=COALESCE(?, balance_after), "
+                    "executed_at=? WHERE id=?",
+                    (price, quantity, price * quantity, values["commission"],
+                     values["realized_pnl"], balance_after,
+                     values["updated_at"], linked["trade_id"]),
+                )
                 return linked["trade_id"]
             position = connection.execute(
                 "SELECT id, avg_entry_price, quantity FROM positions "
@@ -295,8 +322,13 @@ class TradingDatabase:
             )
             return trade_id
 
-    def sync_positions(self, positions: Iterable[dict]):
+    def sync_positions(self, positions: Iterable[dict],
+                       symbols: Optional[Iterable[str]] = None):
+        """同步当前仓位；symbols 用于限定可被判定为已消失的交易对。"""
         now = _utc_now()
+        positions = list(positions)
+        scope = {str(symbol).upper() for symbol in symbols} \
+            if symbols is not None else None
         seen: set[tuple[str, str]] = set()
         with self._connect() as connection:
             for raw in positions:
@@ -342,6 +374,8 @@ class TradingDatabase:
             open_rows = connection.execute(
                 "SELECT * FROM positions WHERE status='OPEN'").fetchall()
             for row in open_rows:
+                if scope is not None and row["symbol"] not in scope:
+                    continue
                 if (row["symbol"], row["position_side"]) in seen:
                     continue
                 close_order = connection.execute(
@@ -350,29 +384,197 @@ class TradingDatabase:
                     "ORDER BY filled_at DESC, updated_at DESC LIMIT 1",
                     (row["symbol"], row["position_side"]),
                 ).fetchone()
-                connection.execute(
-                    "INSERT INTO positions_history (symbol, side, position_mode, "
-                    "entry_price, close_price, tp_price, sl_price, close_order_id, "
-                    "quantity, realized_pnl, commission, commission_asset, position_id, "
-                    "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        row["symbol"], row["position_side"], row["position_mode"],
-                        row["avg_entry_price"] or 0,
-                        (close_order["avg_price"] or close_order["price"])
-                        if close_order else (row["avg_entry_price"] or 0),
-                        row["tp_price"], row["sl_price"],
-                        close_order["order_id"] if close_order else None,
-                        row["quantity"],
-                        close_order["realized_pnl"] if close_order else row["realized_pnl"],
-                        close_order["commission"] if close_order else 0,
-                        close_order["commission_asset"] if close_order else None,
-                        row["id"], row["updated_at"], now,
-                    ),
-                )
+                close_order_id = close_order["order_id"] if close_order else None
+                existing_history = connection.execute(
+                    "SELECT id FROM positions_history WHERE symbol=? "
+                    "AND close_order_id=? ORDER BY id DESC LIMIT 1",
+                    (row["symbol"], close_order_id),
+                ).fetchone() if close_order_id else None
+                if existing_history:
+                    # userTrades may have already created the accurate cycle.
+                    # Only attach locally known protection/position metadata.
+                    connection.execute(
+                        "UPDATE positions_history SET tp_price=COALESCE(tp_price, ?), "
+                        "sl_price=COALESCE(sl_price, ?), "
+                        "position_id=COALESCE(position_id, ?) WHERE id=?",
+                        (row["tp_price"], row["sl_price"], row["id"],
+                         existing_history["id"]),
+                    )
+                else:
+                    connection.execute(
+                        "INSERT INTO positions_history (symbol, side, position_mode, "
+                        "entry_price, close_price, tp_price, sl_price, close_order_id, "
+                        "quantity, realized_pnl, commission, commission_asset, position_id, "
+                        "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (
+                            row["symbol"], row["position_side"], row["position_mode"],
+                            row["avg_entry_price"] or 0,
+                            (close_order["avg_price"] or close_order["price"])
+                            if close_order else (row["avg_entry_price"] or 0),
+                            row["tp_price"], row["sl_price"], close_order_id,
+                            row["quantity"],
+                            close_order["realized_pnl"] if close_order else row["realized_pnl"],
+                            close_order["commission"] if close_order else 0,
+                            close_order["commission_asset"] if close_order else None,
+                            row["id"], row["updated_at"], now,
+                        ),
+                    )
                 connection.execute(
                     "UPDATE positions SET status='CLOSE', quantity=0, updated_at=? WHERE id=?",
                     (now, row["id"]),
                 )
+
+    def sync_user_trades(self, user_trades: Iterable[dict]) -> int:
+        """用 Binance userTrades 补全订单并重建完全结束的仓位周期。
+
+        返回本次识别出的完整仓位周期数量。重复同步会更新同一条历史记录，
+        不会再次插入。
+        """
+        rows = sorted(
+            (dict(item) for item in user_trades),
+            key=lambda item: (_float(item.get("time")), _float(item.get("id"))),
+        )
+        self._update_orders_from_user_trades(rows)
+
+        states: dict[tuple[str, str], dict] = {}
+        completed: list[dict] = []
+        for trade in rows:
+            symbol = str(trade.get("symbol", "")).upper()
+            side = str(trade.get("side", "")).upper()
+            raw_position_side = str(
+                trade.get("positionSide", "BOTH") or "BOTH").upper()
+            quantity = abs(_float(trade.get("qty")))
+            price = _float(trade.get("price"))
+            if not symbol or side not in ("BUY", "SELL") \
+                    or quantity <= 0 or price <= 0:
+                continue
+
+            key = (symbol, raw_position_side)
+            state = states.get(key)
+            if raw_position_side == "LONG":
+                direction, is_open = "LONG", side == "BUY"
+            elif raw_position_side == "SHORT":
+                direction, is_open = "SHORT", side == "SELL"
+            elif state is None or state["remaining"] <= 1e-12:
+                direction, is_open = ("LONG", True) if side == "BUY" \
+                    else ("SHORT", True)
+            else:
+                direction = state["direction"]
+                is_open = side == ("BUY" if direction == "LONG" else "SELL")
+
+            if state is None or state["remaining"] <= 1e-12:
+                if not is_open:
+                    continue
+                state = {
+                    "symbol": symbol, "direction": direction,
+                    "position_mode": "ONE_WAY" if raw_position_side == "BOTH" else "HEDGE",
+                    "remaining": 0.0, "entry_qty": 0.0,
+                    "entry_value": 0.0, "exit_qty": 0.0,
+                    "exit_value": 0.0, "realized_pnl": 0.0,
+                    "commission": 0.0, "commission_asset": None,
+                    "created_at": _event_time(trade.get("time")),
+                    "close_order_id": None,
+                }
+                states[key] = state
+
+            state["commission"] += _float(trade.get("commission"))
+            state["commission_asset"] = trade.get("commissionAsset") \
+                or state["commission_asset"]
+            state["realized_pnl"] += _float(trade.get("realizedPnl"))
+            if is_open:
+                state["remaining"] += quantity
+                state["entry_qty"] += quantity
+                state["entry_value"] += quantity * price
+                continue
+
+            close_quantity = min(quantity, state["remaining"])
+            state["remaining"] -= close_quantity
+            state["exit_qty"] += close_quantity
+            state["exit_value"] += close_quantity * price
+            state["close_order_id"] = str(trade.get("orderId", "")) or None
+            state["updated_at"] = _event_time(trade.get("time"))
+            if state["remaining"] <= 1e-12 and state["exit_qty"] > 0:
+                completed.append(dict(state))
+                states.pop(key, None)
+
+        with self._connect() as connection:
+            for cycle in completed:
+                entry_price = cycle["entry_value"] / cycle["entry_qty"]
+                close_price = cycle["exit_value"] / cycle["exit_qty"]
+                existing = connection.execute(
+                    "SELECT id FROM positions_history WHERE symbol=? "
+                    "AND close_order_id=? ORDER BY id DESC LIMIT 1",
+                    (cycle["symbol"], cycle["close_order_id"]),
+                ).fetchone()
+                values = (
+                    cycle["direction"], cycle["position_mode"], entry_price,
+                    close_price, cycle["entry_qty"], cycle["realized_pnl"],
+                    cycle["commission"], cycle["commission_asset"],
+                    cycle["created_at"], cycle["updated_at"],
+                )
+                if existing:
+                    connection.execute(
+                        "UPDATE positions_history SET side=?, position_mode=?, "
+                        "entry_price=?, close_price=?, quantity=?, realized_pnl=?, "
+                        "commission=?, commission_asset=?, created_at=?, updated_at=? "
+                        "WHERE id=?",
+                        values + (existing["id"],),
+                    )
+                else:
+                    connection.execute(
+                        "INSERT INTO positions_history (symbol, side, position_mode, "
+                        "entry_price, close_price, close_order_id, quantity, "
+                        "realized_pnl, commission, commission_asset, created_at, updated_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (cycle["symbol"], cycle["direction"], cycle["position_mode"],
+                         entry_price, close_price, cycle["close_order_id"],
+                         cycle["entry_qty"], cycle["realized_pnl"],
+                         cycle["commission"], cycle["commission_asset"],
+                         cycle["created_at"], cycle["updated_at"]),
+                    )
+        return len(completed)
+
+    def _update_orders_from_user_trades(self, rows: list[dict]) -> None:
+        grouped: dict[tuple[str, str], list[dict]] = {}
+        for trade in rows:
+            symbol = str(trade.get("symbol", "")).upper()
+            order_id = str(trade.get("orderId", ""))
+            if symbol and order_id:
+                grouped.setdefault((symbol, order_id), []).append(trade)
+        with self._connect() as connection:
+            for (symbol, order_id), fills in grouped.items():
+                quantity = sum(abs(_float(fill.get("qty"))) for fill in fills)
+                if quantity <= 0:
+                    continue
+                avg_price = sum(
+                    abs(_float(fill.get("qty"))) * _float(fill.get("price"))
+                    for fill in fills) / quantity
+                realized_pnl = sum(_float(fill.get("realizedPnl")) for fill in fills)
+                commission = sum(_float(fill.get("commission")) for fill in fills)
+                commission_asset = next((
+                    fill.get("commissionAsset") for fill in reversed(fills)
+                    if fill.get("commissionAsset")), None)
+                updated_at = _event_time(max(
+                    (_float(fill.get("time")) for fill in fills), default=0))
+                connection.execute(
+                    "UPDATE orders SET filled_quantity=?, filled_qty=?, "
+                    "filled_price=?, avg_price=?, realized_pnl=?, commission=?, "
+                    "commission_asset=?, updated_at=? "
+                    "WHERE exchange='binance' AND symbol=? AND order_id=?",
+                    (quantity, quantity, avg_price, avg_price, realized_pnl,
+                     commission, commission_asset, updated_at, symbol, order_id),
+                )
+                linked = connection.execute(
+                    "SELECT trade_id FROM order_trade_links WHERE order_id=?",
+                    (order_id,),
+                ).fetchone()
+                if linked:
+                    connection.execute(
+                        "UPDATE trades SET price=?, quantity=?, cost=?, fee=?, "
+                        "realized_pnl=?, executed_at=? WHERE id=?",
+                        (avg_price, quantity, avg_price * quantity, commission,
+                         realized_pnl, updated_at, linked["trade_id"]),
+                    )
 
     def set_position_protection(self, symbol: str, position_side: str,
                                 tp_price=None, sl_price=None) -> None:
@@ -394,9 +596,10 @@ class TradingDatabase:
         return self.rows(
             "SELECT * FROM positions WHERE status='OPEN' ORDER BY updated_at DESC")
 
-    def position_history(self) -> list[dict]:
+    def position_history(self, limit: int = 10) -> list[dict]:
         return self.rows(
-            "SELECT * FROM positions_history ORDER BY updated_at DESC")
+            "SELECT * FROM positions_history ORDER BY updated_at DESC LIMIT ?",
+            (max(int(limit), 1),))
 
     def current_orders(self) -> list[dict]:
         return self.rows(

@@ -82,3 +82,77 @@ def test_position_protection_prices_survive_position_refresh(tmp_path):
     current = database.current_positions()[0]
     assert current["tp_price"] == 78275
     assert current["sl_price"] == 76725
+
+
+def test_user_trades_rebuild_closed_position_and_update_order(tmp_path):
+    database = TradingDatabase(str(tmp_path / "trading.sqlite3"))
+    database.sync_positions([{
+        "symbol": "BTCUSDT", "positionSide": "BOTH",
+        "positionAmt": "0.01", "entryPrice": "60000",
+    }])
+    database.upsert_order(_order(
+        "FILLED", orderId="2002", side="SELL", reduceOnly=True,
+        executedQty="0.01", avgPrice="61000"))
+
+    user_trades = [
+        {
+            "id": 11, "orderId": 2001, "symbol": "BTCUSDT",
+            "side": "BUY", "positionSide": "BOTH", "price": "60000",
+            "qty": "0.01", "commission": "0.30",
+            "commissionAsset": "USDT", "realizedPnl": "0", "time": 1000,
+        },
+        {
+            "id": 12, "orderId": 2002, "symbol": "BTCUSDT",
+            "side": "SELL", "positionSide": "BOTH", "price": "61000",
+            "qty": "0.01", "commission": "0.31",
+            "commissionAsset": "USDT", "realizedPnl": "10", "time": 2000,
+        },
+    ]
+    completed = database.sync_user_trades(user_trades)
+    database.sync_positions([], symbols=("BTCUSDT",))
+
+    assert completed == 1
+    history = database.position_history()
+    assert len(history) == 1
+    assert history[0]["side"] == "LONG"
+    assert history[0]["entry_price"] == 60000
+    assert history[0]["close_price"] == 61000
+    assert history[0]["realized_pnl"] == 10
+    assert history[0]["commission"] == 0.61
+    order = database.rows("SELECT * FROM orders WHERE order_id='2002'")[0]
+    assert order["realized_pnl"] == 10
+    assert order["commission"] == 0.31
+
+    # Repeating a manual synchronization updates the same official cycle.
+    assert database.sync_user_trades(user_trades) == 1
+    assert len(database.position_history()) == 1
+
+
+def test_websocket_limit_update_keeps_saved_tp_classification(tmp_path):
+    database = TradingDatabase(str(tmp_path / "trading.sqlite3"))
+    database.upsert_order(_order(
+        orderId="3001", side="SELL", type="LIMIT",
+        action_type="TP", use_type="TP_CLOSE"))
+
+    values, _ = database.upsert_order(_order(
+        "FILLED", orderId="3001", side="SELL", type="LIMIT",
+        executedQty="0.01", avgPrice="61000"))
+
+    assert values["action_type"] == "TP"
+    assert values["use_type"] == "TP_CLOSE"
+    database.record_filled_trade(_order(
+        "FILLED", orderId="3001", side="SELL", type="LIMIT",
+        executedQty="0.01", avgPrice="61000"))
+    assert database.rows("SELECT * FROM trades")[0]["trade_type"] == "TAKE_PROFIT"
+
+
+def test_symbol_scoped_position_sync_does_not_close_other_symbols(tmp_path):
+    database = TradingDatabase(str(tmp_path / "trading.sqlite3"))
+    database.sync_positions([
+        {"symbol": "BTCUSDT", "positionSide": "BOTH", "positionAmt": "0.01"},
+        {"symbol": "ETHUSDT", "positionSide": "BOTH", "positionAmt": "0.5"},
+    ])
+
+    database.sync_positions([], symbols=("BTCUSDT",))
+
+    assert [row["symbol"] for row in database.current_positions()] == ["ETHUSDT"]

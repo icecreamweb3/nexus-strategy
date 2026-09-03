@@ -79,3 +79,21 @@ def test_order_time_is_displayed_in_system_local_timezone():
         "2026-08-29 04:31:30") == expected
     assert RealtimeStrategyTab._format_local_time(
         1787977890000) == expected
+
+
+def test_close_trade_event_detects_reduce_only_and_saved_tp():
+    assert RealtimeStrategyTab._is_close_trade_event(
+        {"x": "TRADE", "rp": "0"},
+        {"reduce_only": 1, "action_type": "OPEN"},
+    )
+    assert RealtimeStrategyTab._is_close_trade_event(
+        {"x": "TRADE", "rp": "0"},
+        {"reduce_only": 0, "action_type": "TP"},
+    )
+
+
+def test_close_trade_event_ignores_opening_trade():
+    assert not RealtimeStrategyTab._is_close_trade_event(
+        {"x": "TRADE", "rp": "0"},
+        {"reduce_only": 0, "action_type": "OPEN"},
+    )

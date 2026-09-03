@@ -3333,8 +3333,9 @@ class BinanceClient:
             logger.debug(f"Failed to estimate margin ratio after order: {e}")
             return None
     
-    def get_user_trades(self, symbol: str = None, start_time: Optional[datetime] = None, 
-                       end_time: Optional[datetime] = None, limit: int = 1000) -> List[dict]:
+    def get_user_trades(self, symbol: str = None, start_time: Optional[datetime] = None,
+                       end_time: Optional[datetime] = None, limit: int = 1000,
+                       raise_on_error: bool = False) -> List[dict]:
         """Get user's trade history from Binance Futures API
         API: GET /fapi/v1/userTrades
         
@@ -3362,6 +3363,8 @@ class BinanceClient:
             return trades
         except Exception as e:
             logger.debug(f"Failed to get user trades: {e}")
+            if raise_on_error:
+                raise
             return []
     
     def get_income_history(self, symbol: str = None, income_type: str = 'REALIZED_PNL',
