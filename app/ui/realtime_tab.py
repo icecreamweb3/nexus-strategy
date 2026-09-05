@@ -12,6 +12,7 @@ from PyQt5.QtWidgets import (
 )
 
 from app.backtest.engine import LONG, base_order_notional, required_order_margin
+from app.backtest.params_io import load_market_params, save_params
 from app.client.kline_stream import KlineStream, PerpetualPriceStream
 from app.client.live_gateway import BinanceLiveGateway
 from app.config import load_config
@@ -43,7 +44,10 @@ class RealtimeStrategyTab(BacktestTab):
         self._strategy_capital = None
         self._pending_realized_pnl = 0.0
         self._processed_trade_ids = set()
+        self._pending_close_order_ids = set()
         self._entry_kline_index = None
+        self._exit_since_last_closed_kline = False
+        self._pending_protection_exit = False
         self._latest_close = None
         self._live_prices = {}
         self._current_position_rows = []
@@ -51,16 +55,75 @@ class RealtimeStrategyTab(BacktestTab):
         self._live_log_path = ""
         self._db = TradingDatabase()
         super().__init__(parent)
+        self._restore_market_settings()
         self.cmb_symbol.currentIndexChanged.connect(self._on_symbol_changed)
         if self.cmb_symbol.lineEdit() is not None:
             self.cmb_symbol.lineEdit().editingFinished.connect(
                 self._on_symbol_changed)
+            self.cmb_symbol.lineEdit().editingFinished.connect(
+                self._save_current_settings)
+        self._connect_auto_save()
         QTimer.singleShot(0, self._restart_price_stream)
-        QTimer.singleShot(100, lambda: self._refresh_account(show_errors=False))
+        QTimer.singleShot(
+            100, lambda: self._refresh_account(
+                show_errors=False, sync_history=True))
         self._account_refresh_timer = QTimer(self)
         self._account_refresh_timer.setInterval(15_000)
         self._account_refresh_timer.timeout.connect(self._auto_refresh_account)
         self._account_refresh_timer.start()
+
+    def _connect_auto_save(self):
+        """任一可编辑策略参数变化后立即保存当前完整配置。"""
+        checkboxes = (
+            self.chk_volume, self.chk_single, self.chk_consec, self.chk_cum,
+            self.chk_atr, self.chk_shadow, self.chk_exit_bar_signal,
+        )
+        spins = (
+            self.sp_volume_prev_n, self.sp_volume_mult,
+            self.sp_single_pct, self.sp_single_max_pct,
+            self.sp_consec_count, self.sp_cum_klines, self.sp_cum_pct,
+            self.sp_atr_period, self.sp_atr_min, self.sp_atr_max,
+            self.sp_shadow_upper, self.sp_total_capital, self.sp_split_count,
+            self.sp_leverage, self.sp_fee, self.sp_stop_loss,
+            self.sp_cooldown, self.sp_take_profit, self.sp_add_interval,
+            self.sp_add_mult, self.sp_add_count, self.sp_max_hold,
+        )
+        for checkbox in checkboxes:
+            checkbox.stateChanged.connect(self._save_current_settings)
+        for spin in spins:
+            spin.valueChanged.connect(self._save_current_settings)
+        self.cmb_direction.currentIndexChanged.connect(
+            self._save_current_settings)
+        self.cmb_symbol.currentTextChanged.connect(
+            self._save_current_settings)
+        self.cmb_interval.currentTextChanged.connect(
+            self._save_current_settings)
+
+    def _restore_market_settings(self):
+        try:
+            market = load_market_params(self._default_params_path())
+        except Exception as exc:  # noqa: BLE001
+            get_logger().warning("加载实时市场参数失败: %s", exc)
+            return
+        symbol = market.get("symbol", "").strip().upper()
+        interval = market.get("interval", "").strip()
+        if symbol:
+            self.cmb_symbol.setCurrentText(symbol)
+        if interval in INTERVALS:
+            self.cmb_interval.setCurrentText(interval)
+
+    def _save_current_settings(self, *_args):
+        try:
+            strategy, order = self._collect_params()
+            save_params(
+                self._default_params_path(), strategy, order,
+                market={
+                    "symbol": self.cmb_symbol.currentText().strip().upper(),
+                    "interval": self.cmb_interval.currentText(),
+                },
+            )
+        except (OSError, ValueError) as exc:
+            get_logger().warning("自动保存参数失败: %s", exc)
 
     def _build_ui(self):
         root = QVBoxLayout(self)
@@ -112,7 +175,8 @@ class RealtimeStrategyTab(BacktestTab):
         self.lbl_risk_value.setStyleSheet("color: #00a99d;")
         self.btn_refresh_account = QPushButton()
         self._reg(self.btn_refresh_account.setText, "live_refresh")
-        self.btn_refresh_account.clicked.connect(lambda: self._refresh_account())
+        self.btn_refresh_account.clicked.connect(
+            lambda: self._refresh_account(sync_history=True))
         self.btn_sync_account = QPushButton()
         self._reg(self.btn_sync_account.setText, "live_sync")
         self.btn_sync_account.clicked.connect(lambda: self._sync_account_records())
@@ -300,7 +364,10 @@ class RealtimeStrategyTab(BacktestTab):
             self._strategy_capital = float(order.total_capital)
             self._pending_realized_pnl = 0.0
             self._processed_trade_ids.clear()
+            self._pending_close_order_ids.clear()
             self._entry_kline_index = None
+            self._exit_since_last_closed_kline = False
+            self._pending_protection_exit = False
             self._update_strategy_capital_label()
             self._log_lines.clear()
             self._page = 0
@@ -311,7 +378,7 @@ class RealtimeStrategyTab(BacktestTab):
             initial_signal = processor.evaluate_latest_closed()
             if initial_signal is not None:
                 self._place_signal_order(initial_signal)
-            self._refresh_account(show_errors=False)
+            self._refresh_account(show_errors=False, sync_history=True)
             get_logger().info(
                 "实时策略启动: %s %s, 所需预热K线=%d, 实际=%d",
                 symbol, interval, required_bars, len(klines))
@@ -339,7 +406,10 @@ class RealtimeStrategyTab(BacktestTab):
         self._strategy_capital = None
         self._pending_realized_pnl = 0.0
         self._processed_trade_ids.clear()
+        self._pending_close_order_ids.clear()
         self._entry_kline_index = None
+        self._exit_since_last_closed_kline = False
+        self._pending_protection_exit = False
         self._update_strategy_capital_label()
         self._close_live_log()
         self.cmb_symbol.setEnabled(True)
@@ -445,21 +515,26 @@ class RealtimeStrategyTab(BacktestTab):
     def _on_closed_kline(self, kline):
         if not self._running or self._processor is None:
             return
-        signal = self._processor.add_closed_kline(kline)
+        self._processor.add_closed_kline(kline, evaluate=False)
         self.klines = self._processor.klines
         self._latest_close = kline.close
-        self._close_on_time_limit(kline.index)
+        exited = self._exit_since_last_closed_kline
+        exited = self._close_on_time_limit(kline.index) or exited
+        self._exit_since_last_closed_kline = False
+        signal = None
+        if self._processor.order.exit_bar_signal_enabled or not exited:
+            signal = self._processor.evaluate_latest_closed()
         if signal is not None:
             self._place_signal_order(signal)
 
     def _close_on_time_limit(self, current_kline: int):
-        """最长持仓到期时按市价平仓，并让本根收盘信号继续生效。"""
+        """最长持仓到期时按市价平仓，并报告本根发生了退出。"""
         if self._entry_kline_index is None or self._processor is None \
                 or self._gateway is None:
-            return
+            return False
         limit = int(self._processor.order.max_hold_klines)
         if limit <= 0 or current_kline - self._entry_kline_index + 1 < limit:
-            return
+            return False
         symbol = self.cmb_symbol.currentText().strip().upper()
         client = self._gateway.client
         positions = client.get_positions(symbol)
@@ -479,6 +554,7 @@ class RealtimeStrategyTab(BacktestTab):
                         "error_message", "TIME 市价平仓失败"))
                 order_id = result.get("orderId")
                 if order_id is not None:
+                    self._pending_close_order_ids.add(str(order_id))
                     final_order = client.get_order_status(symbol, str(order_id))
                     result = final_order or result
                     for fill in client.get_trade_fills(symbol, str(order_id)):
@@ -499,10 +575,12 @@ class RealtimeStrategyTab(BacktestTab):
             self._record_log(tr(
                 "realtime_time_position_closed", symbol=symbol,
                 kline=current_kline), True)
+            return True
         except Exception as exc:  # noqa: BLE001
             self._record_log(tr("realtime_time_close_failed", err=exc), True)
             QMessageBox.warning(self, tr("app_title"), tr(
                 "realtime_time_close_failed", err=exc))
+            return False
         finally:
             self._placing_order = False
 
@@ -529,7 +607,8 @@ class RealtimeStrategyTab(BacktestTab):
     def _on_symbol_changed(self, *_args):
         self._restart_price_stream()
         QTimer.singleShot(
-            0, lambda: self._refresh_account(show_errors=False))
+            0, lambda: self._refresh_account(
+                show_errors=False, sync_history=True))
 
     def _on_live_price(self, symbol: str, price: float):
         current_symbol = self.cmb_symbol.currentText().strip().upper()
@@ -706,12 +785,23 @@ class RealtimeStrategyTab(BacktestTab):
                 f"{balance:,.2f} {margin_asset}")
             self.lbl_risk_value.setText(
                 f"{risk * 100:.2f}%" if risk is not None else "0.00%")
-            for remote_order in (
-                client.get_order_history(symbol) + client.get_open_orders(symbol)):
+            history_orders = client.get_order_history(symbol)
+            open_orders = client.get_open_orders(symbol)
+            algo_orders = [
+                self._normalize_algo_order(item)
+                for item in client.get_all_algo_orders(symbol)
+            ]
+            current_orders = open_orders + algo_orders
+            for remote_order in history_orders + current_orders:
                 _, newly_filled = self._db.upsert_order(remote_order)
                 if newly_filled:
                     self._db.record_filled_trade(
                         remote_order, balance_after=balance)
+            self._db.reconcile_open_orders(
+                symbol,
+                [str(item.get("i", item.get("orderId", "")))
+                 for item in current_orders],
+            )
             if sync_history:
                 self._sync_user_trades(symbol, client=client, refresh=False)
             else:
@@ -722,6 +812,37 @@ class RealtimeStrategyTab(BacktestTab):
             if show_errors:
                 QMessageBox.warning(self, tr("app_title"), tr("live_error", err=exc))
             return False
+
+    @staticmethod
+    def _normalize_algo_order(order: dict) -> dict:
+        """把 Binance Algo 条件委托转换为统一订单字段。"""
+        normalized = dict(order)
+        algo_id = order.get("algoId", order.get("aid"))
+        actual_order_id = order.get("actualOrderId")
+        normalized["orderId"] = str(
+            actual_order_id
+            if actual_order_id not in (None, "", 0, "0")
+            else f"algo:{algo_id}")
+        normalized["clientOrderId"] = order.get(
+            "clientAlgoId", order.get("clientOrderId"))
+        normalized["type"] = order.get(
+            "orderType", order.get("type", "CONDITIONAL"))
+        normalized["status"] = order.get(
+            "algoStatus", order.get("status", "NEW"))
+        normalized["origQty"] = order.get(
+            "quantity", order.get("origQty", 0))
+        normalized["executedQty"] = order.get(
+            "executedQty", order.get("actualQuantity", 0))
+        normalized["avgPrice"] = order.get(
+            "actualPrice", order.get("avgPrice", 0))
+        normalized["stopPrice"] = order.get(
+            "triggerPrice", order.get("stopPrice", 0))
+        normalized["updateTime"] = order.get(
+            "updateTime", order.get("createTime"))
+        normalized["algoId"] = algo_id
+        normalized["reduceOnly"] = bool(order.get("reduceOnly", False)) \
+            or bool(order.get("closePosition", False))
+        return normalized
 
     def _sync_account_records(self):
         """手工从 Binance 强制校准订单、当前仓位和历史仓位。"""
@@ -788,6 +909,8 @@ class RealtimeStrategyTab(BacktestTab):
         value = self._strategy_capital
         self.lbl_strategy_capital_value.setText(
             "—" if value is None else f"{value:,.2f}")
+        if value is not None and self.sp_total_capital.value() != value:
+            self.sp_total_capital.setValue(value)
 
     def _insert_order(self, order: dict, symbol: str, side: str):
         order_id = order.get("orderId")
@@ -805,7 +928,10 @@ class RealtimeStrategyTab(BacktestTab):
                 balance = self._number_from_label(self.lbl_balance_value.text())
                 self._db.record_filled_trade(order, balance_after=balance)
             if self._is_close_trade_event(order, values):
-                self._sync_user_trades(values["symbol"])
+                if values.get("order_id"):
+                    self._pending_close_order_ids.add(values["order_id"])
+                if values.get("action_type") in ("TP", "SL"):
+                    self._pending_protection_exit = True
             self._apply_realized_pnl_if_position_closed(order)
             self._refresh_record_tables()
         except Exception as exc:  # noqa: BLE001
@@ -872,27 +998,43 @@ class RealtimeStrategyTab(BacktestTab):
             except (TypeError, ValueError):
                 pass
         symbol = str(order.get("s", order.get("symbol", ""))).upper()
-        if not symbol or self._pending_realized_pnl == 0:
+        if not symbol or (self._pending_realized_pnl == 0
+                          and not self._pending_protection_exit
+                          and not self._pending_close_order_ids):
             return
         self._reconcile_strategy_capital(symbol)
 
     def _reconcile_strategy_capital(self, symbol: str):
-        if not symbol or self._pending_realized_pnl == 0 \
-                or self._gateway is None or self._strategy_capital is None:
+        if not symbol or self._gateway is None or self._strategy_capital is None:
+            return
+        if not self._pending_close_order_ids:
             return
         has_position = self._gateway.client.has_open_position(symbol)
         if has_position is not False:
             return
-        pnl = self._pending_realized_pnl
+        try:
+            self._sync_user_trades(symbol, refresh=False)
+        except Exception as exc:  # noqa: BLE001
+            get_logger().warning("读取真实仓位历史失败，稍后重试: %s", exc)
+            return
+        pnl, claimed = self._db.claim_position_realized_pnl(
+            self._pending_close_order_ids)
+        if claimed == 0:
+            return
+        self._pending_close_order_ids.clear()
         self._strategy_capital += pnl
         self._pending_realized_pnl = 0.0
         self._entry_kline_index = None
+        if self._pending_protection_exit:
+            self._exit_since_last_closed_kline = True
+        self._pending_protection_exit = False
         self._update_strategy_capital_label()
         # 完全平仓后撤掉另一侧仍存活的 TP/SL，避免旧保护单遗留。
         self._gateway.client.cancel_all_open_orders(symbol)
-        self._record_log(tr(
-            "realtime_strategy_capital_updated", pnl=f"{pnl:+.2f}",
-            capital=f"{self._strategy_capital:.2f}"), True)
+        if pnl != 0:
+            self._record_log(tr(
+                "realtime_strategy_capital_updated", pnl=f"{pnl:+.2f}",
+                capital=f"{self._strategy_capital:.2f}"), True)
 
     @staticmethod
     def _number_from_label(text: str):
@@ -1049,7 +1191,13 @@ class RealtimeStrategyTab(BacktestTab):
                 if not config.has_credentials:
                     raise RuntimeError(tr("live_no_credentials"))
                 client = BinanceLiveGateway(config).client
-            result = client.cancel_order(symbol, order_id)
+            if order_id.startswith("algo:"):
+                result = client.cancel_algo_order(
+                    symbol=symbol, algo_id=int(order_id.split(":", 1)[1]))
+                if result:
+                    result = self._normalize_algo_order(result)
+            else:
+                result = client.cancel_order(symbol, order_id)
             if not result:
                 raise RuntimeError(tr("cancel_order_failed"))
             self._on_order_update(result)
@@ -1057,6 +1205,7 @@ class RealtimeStrategyTab(BacktestTab):
             QMessageBox.warning(self, tr("app_title"), tr("live_error", err=exc))
 
     def close_listener(self):
+        self._save_current_settings()
         if self._price_stream is not None:
             self._price_stream.stop()
             self._price_stream = None

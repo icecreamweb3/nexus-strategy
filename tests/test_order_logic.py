@@ -76,7 +76,7 @@ class OrderLogicTests(unittest.TestCase):
                 self.assertEqual(engine.current_capital, capital)
                 self.assertEqual(second.cost, next_amount)
 
-    def test_exit_kline_is_scanned_and_signal_enters_on_next_open(self):
+    def test_enabled_exit_kline_is_scanned_and_signal_enters_on_next_open(self):
         ks = [
             kline(1, 90, 91, 89, 90),
             kline(2, 90, 101, 89, 100),   # signal; first entry on #3
@@ -94,6 +94,36 @@ class OrderLogicTests(unittest.TestCase):
         self.assertEqual(trades[0].exit_type, "SL")
         self.assertEqual(trades[0].exit_kline, 3)
         self.assertEqual(trades[1].entry_kline, 4)
+
+    def test_disabled_exit_kline_is_skipped_for_sl_tp_and_timeout(self):
+        cases = (
+            ("SL", dict(stop_loss=5, take_profit=0, max_hold_klines=0),
+             kline(3, 100, 111, 94, 110)),
+            ("TP", dict(stop_loss=0, take_profit=5, max_hold_klines=0),
+             kline(3, 100, 111, 99, 110)),
+            ("TIMEOUT", dict(stop_loss=0, take_profit=0, max_hold_klines=1),
+             kline(3, 100, 111, 99, 110)),
+        )
+        for exit_type, exit_params, exit_bar in cases:
+            with self.subTest(exit_type=exit_type):
+                ks = [
+                    kline(1, 90, 91, 89, 90),
+                    kline(2, 90, 101, 89, 100),
+                    exit_bar,
+                    kline(4, 123, 124, 122, 123),
+                    kline(5, 130, 131, 129, 130),
+                    kline(6, 130, 131, 129, 130),
+                ]
+                trades = BacktestEngine(
+                    ks, signal_params(),
+                    OrderParams(
+                        leverage=1, fee_rate_pct=0, stop_cooldown=0,
+                        exit_bar_signal_enabled=False, **exit_params),
+                ).run()
+
+                self.assertEqual(trades[0].exit_type, exit_type)
+                self.assertEqual(trades[0].exit_kline, 3)
+                self.assertEqual(trades[1].entry_kline, 5)
 
     def test_add_then_stop_then_take_profit_priority_on_entry_kline(self):
         logs = []

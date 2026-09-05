@@ -127,6 +127,10 @@ def test_user_trades_rebuild_closed_position_and_update_order(tmp_path):
     assert database.sync_user_trades(user_trades) == 1
     assert len(database.position_history()) == 1
 
+    pnl, count = database.claim_position_realized_pnl(["2002"])
+    assert (pnl, count) == (10, 1)
+    assert database.claim_position_realized_pnl(["2002"]) == (0, 1)
+
 
 def test_websocket_limit_update_keeps_saved_tp_classification(tmp_path):
     database = TradingDatabase(str(tmp_path / "trading.sqlite3"))
@@ -156,3 +160,27 @@ def test_symbol_scoped_position_sync_does_not_close_other_symbols(tmp_path):
     database.sync_positions([], symbols=("BTCUSDT",))
 
     assert [row["symbol"] for row in database.current_positions()] == ["ETHUSDT"]
+
+
+def test_order_history_defaults_to_latest_ten(tmp_path):
+    database = TradingDatabase(str(tmp_path / "trading.sqlite3"))
+    for order_id in range(12):
+        database.upsert_order(_order(
+            "FILLED", orderId=str(order_id), updateTime=order_id * 1000))
+
+    history = database.order_history()
+
+    assert len(history) == 10
+    assert [row["order_id"] for row in history[:2]] == ["11", "10"]
+
+
+def test_open_order_snapshot_removes_stale_local_orders(tmp_path):
+    database = TradingDatabase(str(tmp_path / "trading.sqlite3"))
+    database.upsert_order(_order("NEW", orderId="1"))
+    database.upsert_order(_order("NEW", orderId="2"))
+
+    database.reconcile_open_orders("BTCUSDT", ["2"])
+
+    assert [row["order_id"] for row in database.current_orders()] == ["2"]
+    assert database.rows(
+        "SELECT status FROM orders WHERE order_id='1'")[0]["status"] == "CANCELED"

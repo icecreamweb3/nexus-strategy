@@ -99,6 +99,7 @@
   "add_mult": "DCA Multiplier",
   "add_count": "Total Entries (Initial Included)",
   "max_hold_klines": "Max Hold (Entry Bar = 1)",
+  "exit_bar_signal_enabled": "Use TP / SL / TIME Exit Bar as Signal Bar",
 
   "type_diff": "Diff",
   "type_pct": "Percent",

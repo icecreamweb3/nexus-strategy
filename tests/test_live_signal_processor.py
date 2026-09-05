@@ -68,6 +68,16 @@ class LiveSignalProcessorTests(unittest.TestCase):
         self.assertEqual(signal.kline.index, 2)
         self.assertIsNone(processor.evaluate_latest_closed())
 
+    def test_closed_kline_can_be_appended_without_signal_evaluation(self):
+        processor = self.processor([bar(1, 0, 100)])
+
+        self.assertIsNone(processor.add_closed_kline(
+            bar(0, 60_000, 110), evaluate=False))
+        signal = processor.evaluate_latest_closed()
+
+        self.assertIsNotNone(signal)
+        self.assertEqual(signal.kline.index, 2)
+
 
 if __name__ == "__main__":
     unittest.main()

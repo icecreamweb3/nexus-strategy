@@ -78,6 +78,7 @@ class OrderParams:
     add_mult: float = 1.0             # 每次加仓金额 = 当笔基础下单金额 × 倍数
     add_count: int = 1                # 含开仓的总次数：1 表示不加仓，2 表示加一仓
     max_hold_klines: int = 0          # 最长持仓K线数，到期按收盘价平仓；0 表示不限制
+    exit_bar_signal_enabled: bool = True  # TP/SL/TIME 平仓当根是否参与信号判断
 
 
 @dataclass
@@ -635,12 +636,14 @@ class BacktestEngine:
                     position = None
                 if position is not None:
                     continue
-                # TP / SL / TIMEOUT 的平仓 K 线仍参与信号判断；信号只会
-                # 安排到下一根连续 K 线开盘成交，不会在本根重新开仓。
-                sig = self._combined_signal(i)
-                if sig is not None and (op.direction == "BOTH" or sig == op.direction):
-                    entry_signal = (sig, k.index)
-                    self._log(self._tr("log_signal", side=sig, kline=k.index))
+                # 可选择让 TP / SL / TIMEOUT 的平仓 K 线参与信号判断；
+                # 即使参与，信号也只会安排到下一根连续 K 线开盘成交。
+                if op.exit_bar_signal_enabled:
+                    sig = self._combined_signal(i)
+                    if sig is not None and (
+                            op.direction == "BOTH" or sig == op.direction):
+                        entry_signal = (sig, k.index)
+                        self._log(self._tr("log_signal", side=sig, kline=k.index))
                 continue
 
             # 1、17. 仅空仓时寻找信号；平仓当根已在上方 continue。

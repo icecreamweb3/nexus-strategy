@@ -2,7 +2,7 @@
 import configparser
 import os
 from dataclasses import fields
-from typing import Tuple
+from typing import Mapping, Tuple
 
 from app.backtest.engine import OrderParams, StrategyParams
 
@@ -19,7 +19,7 @@ STRATEGY_PARAM_NAMES = (
 ORDER_PARAM_NAMES = (
     "total_capital", "split_count", "leverage", "fee_rate_pct", "stop_loss",
     "stop_cooldown", "take_profit", "direction", "add_interval_pct",
-    "add_mult", "add_count", "max_hold_klines",
+    "add_mult", "add_count", "max_hold_klines", "exit_bar_signal_enabled",
 )
 
 
@@ -58,8 +58,15 @@ def _read_section(config, section: str, defaults, allowed_names):
     return values
 
 
-def save_params(path: str, strategy: StrategyParams, order: OrderParams):
+def save_params(path: str, strategy: StrategyParams, order: OrderParams,
+                market: Mapping[str, str] | None = None):
     config = configparser.ConfigParser(interpolation=None)
+    if market is None and os.path.isfile(path):
+        # 手工保存策略参数时保留实时页已经自动保存的市场选择。
+        try:
+            config.read(path, encoding="utf-8")
+        except configparser.Error:
+            config = configparser.ConfigParser(interpolation=None)
     config["meta"] = {"format": "nexus-strategy-params", "version": "1"}
     config["strategy"] = {
         name: _stringify(getattr(strategy, name)) for name in STRATEGY_PARAM_NAMES
@@ -67,6 +74,8 @@ def save_params(path: str, strategy: StrategyParams, order: OrderParams):
     config["order"] = {
         name: _stringify(getattr(order, name)) for name in ORDER_PARAM_NAMES
     }
+    if market is not None:
+        config["market"] = {name: str(value) for name, value in market.items()}
     directory = os.path.dirname(os.path.abspath(path))
     os.makedirs(directory, exist_ok=True)
     with open(path, "w", encoding="utf-8") as output:
@@ -108,3 +117,17 @@ def load_params(path: str) -> Tuple[StrategyParams, OrderParams]:
     if order.leverage < 0:
         raise ParamsFileError("leverage must not be negative")
     return strategy, order
+
+
+def load_market_params(path: str) -> dict[str, str]:
+    """读取可选的实时市场设置；旧参数文件没有该节时返回空字典。"""
+    config = configparser.ConfigParser(interpolation=None)
+    try:
+        loaded = config.read(path, encoding="utf-8")
+    except configparser.Error as exc:
+        raise ParamsFileError(str(exc)) from exc
+    if not loaded:
+        return {}
+    if not config.has_section("market"):
+        return {}
+    return {name: value for name, value in config.items("market")}

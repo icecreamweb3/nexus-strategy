@@ -290,6 +290,9 @@ class BacktestTab(QWidget):
         self.sp_add_mult = _dspin(1.0, maximum=100.0)
         self.sp_add_count = _ispin(1, maximum=100, minimum=0)
         self.sp_max_hold = _ispin(0)
+        self.chk_exit_bar_signal = QCheckBox()
+        self.chk_exit_bar_signal.setChecked(True)
+        self._reg(self.chk_exit_bar_signal.setText, "exit_bar_signal_enabled")
 
         row = 0
         ogrid.addWidget(self._label("total_capital"), row, 0,
@@ -331,6 +334,8 @@ class BacktestTab(QWidget):
         ogrid.addWidget(self._label("add_count"), row, 4,
                         alignment=Qt.AlignRight | Qt.AlignVCenter)
         ogrid.addWidget(self.sp_add_count, row, 5)
+        row += 1
+        ogrid.addWidget(self.chk_exit_bar_signal, row, 0, 1, 6)
         row += 1
 
         strat_box.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
@@ -522,6 +527,7 @@ class BacktestTab(QWidget):
         self.sp_add_mult.setValue(op.add_mult)
         self.sp_add_count.setValue(op.add_count)
         self.sp_max_hold.setValue(op.max_hold_klines)
+        self.chk_exit_bar_signal.setChecked(op.exit_bar_signal_enabled)
 
     @staticmethod
     def _default_params_path() -> str:
@@ -591,6 +597,7 @@ class BacktestTab(QWidget):
             add_mult=self.sp_add_mult.value(),
             add_count=self.sp_add_count.value(),
             max_hold_klines=self.sp_max_hold.value(),
+            exit_bar_signal_enabled=self.chk_exit_bar_signal.isChecked(),
         )
         return sp, op
 
@@ -752,8 +759,22 @@ class BacktestTab(QWidget):
         total_pages = max((len(lines) + size - 1) // size, 1)
         self._page = min(self._page, total_pages - 1)
         start = self._page * size
-        self.log_view.setPlainText("\n".join(lines[start:start + size]))
+        self._set_log_text_preserving_scroll(
+            self.log_view, "\n".join(lines[start:start + size]))
         self.lbl_page.setText(tr("page_info", cur=self._page + 1, total=total_pages))
+
+    @staticmethod
+    def _set_log_text_preserving_scroll(log_view: QTextEdit, text: str):
+        """仅当用户原本位于底部时，更新后继续跟随最新日志。"""
+        scrollbar = log_view.verticalScrollBar()
+        old_value = scrollbar.value()
+        was_at_bottom = old_value >= scrollbar.maximum() - 1
+        log_view.setPlainText(text)
+        scrollbar = log_view.verticalScrollBar()
+        if was_at_bottom:
+            scrollbar.setValue(scrollbar.maximum())
+        else:
+            scrollbar.setValue(min(old_value, scrollbar.maximum()))
 
     def _turn_page(self, delta: int):
         lines = self._filtered_logs()

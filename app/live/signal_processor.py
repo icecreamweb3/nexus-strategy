@@ -52,7 +52,8 @@ class LiveSignalProcessor:
                 parsed = parsed.replace(tzinfo=timezone.utc)
             return int(parsed.timestamp() * 1000)
 
-    def add_closed_kline(self, kline: Kline) -> Optional[LiveSignal]:
+    def add_closed_kline(self, kline: Kline,
+                         evaluate: bool = True) -> Optional[LiveSignal]:
         key = self._time_key(kline)
         if self._last_open_time is not None and key <= self._last_open_time:
             return None
@@ -60,6 +61,8 @@ class LiveSignalProcessor:
         self.klines.append(kline)
         self._last_open_time = key
 
+        if not evaluate:
+            return None
         return self._evaluate(len(self.klines) - 1)
 
     def evaluate_latest_closed(self) -> Optional[LiveSignal]:

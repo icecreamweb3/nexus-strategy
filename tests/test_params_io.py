@@ -4,7 +4,9 @@ import tempfile
 import unittest
 
 from app.backtest.engine import OrderParams, StrategyParams
-from app.backtest.params_io import ParamsFileError, load_params, save_params
+from app.backtest.params_io import (
+    ParamsFileError, load_market_params, load_params, save_params,
+)
 
 
 class ParamsIoTests(unittest.TestCase):
@@ -36,6 +38,7 @@ class ParamsIoTests(unittest.TestCase):
             add_mult=1.5,
             add_count=3,
             max_hold_klines=120,
+            exit_bar_signal_enabled=False,
         )
         with tempfile.TemporaryDirectory() as directory:
             path = os.path.join(directory, "params.inf")
@@ -51,6 +54,7 @@ class ParamsIoTests(unittest.TestCase):
             self.assertEqual(loaded_order.leverage, 6)
             self.assertEqual(loaded_order.direction, "LONG")
             self.assertEqual(loaded_order.add_count, 3)
+            self.assertFalse(loaded_order.exit_bar_signal_enabled)
 
             config = configparser.ConfigParser()
             config.read(path, encoding="utf-8")
@@ -72,6 +76,7 @@ class ParamsIoTests(unittest.TestCase):
             self.assertEqual(loaded_order.total_capital, 2500)
             self.assertEqual(loaded_order.split_count, 1)
             self.assertEqual(loaded_order.leverage, 0.4)
+            self.assertTrue(loaded_order.exit_bar_signal_enabled)
 
     def test_invalid_inf_file_is_rejected(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -80,6 +85,20 @@ class ParamsIoTests(unittest.TestCase):
                 output.write("[strategy]\nvolume_enabled = true\n")
             with self.assertRaises(ParamsFileError):
                 load_params(path)
+
+    def test_market_settings_round_trip_and_survive_manual_param_save(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = os.path.join(directory, "params.inf")
+            save_params(
+                path, StrategyParams(), OrderParams(),
+                market={"symbol": "ETHUSDT", "interval": "4h"})
+
+            self.assertEqual(load_market_params(path), {
+                "symbol": "ETHUSDT", "interval": "4h"})
+
+            save_params(path, StrategyParams(volume_enabled=False), OrderParams())
+            self.assertEqual(load_market_params(path), {
+                "symbol": "ETHUSDT", "interval": "4h"})
 
 
 if __name__ == "__main__":

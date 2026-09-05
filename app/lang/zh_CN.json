@@ -99,6 +99,7 @@
   "add_mult": "加仓倍数",
   "add_count": "总仓次数(含开仓)",
   "max_hold_klines": "最长持仓(K线，入场=1)",
+  "exit_bar_signal_enabled": "TP / SL / TIME 当根K线作为信号K线",
   "type_diff": "差值",
   "type_pct": "百分比",
   "limit_order": "限价单",

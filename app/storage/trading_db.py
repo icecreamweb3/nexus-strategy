@@ -125,6 +125,14 @@ CREATE TABLE IF NOT EXISTS order_trade_links (
     trade_id INTEGER NOT NULL REFERENCES trades (id)
 );
 
+CREATE TABLE IF NOT EXISTS strategy_balance_events (
+    close_order_id TEXT PRIMARY KEY,
+    position_history_id INTEGER NOT NULL UNIQUE
+        REFERENCES positions_history (id),
+    realized_pnl REAL NOT NULL,
+    applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE UNIQUE INDEX IF NOT EXISTS ux_orders_exchange_order_id
 ON orders(exchange, order_id) WHERE order_id IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS ux_positions_exchange_symbol_side
@@ -588,6 +596,53 @@ class TradingDatabase:
                  position_side.upper()),
             )
 
+    def claim_position_realized_pnl(
+            self, close_order_ids: Iterable[str]) -> tuple[float, int]:
+        """原子领取已结束仓位的真实盈亏，每个平仓订单最多领取一次。"""
+        ids = tuple(dict.fromkeys(
+            str(value) for value in close_order_ids if value not in (None, "")))
+        if not ids:
+            return 0.0, 0
+        placeholders = ", ".join("?" for _ in ids)
+        total = 0.0
+        resolved = 0
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT id, close_order_id, realized_pnl FROM positions_history "
+                f"WHERE close_order_id IN ({placeholders})", ids,
+            ).fetchall()
+            for row in rows:
+                resolved += 1
+                cursor = connection.execute(
+                    "INSERT OR IGNORE INTO strategy_balance_events "
+                    "(close_order_id, position_history_id, realized_pnl, applied_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (row["close_order_id"], row["id"], row["realized_pnl"],
+                     _utc_now()),
+                )
+                if cursor.rowcount:
+                    total += float(row["realized_pnl"] or 0)
+        return total, resolved
+
+    def reconcile_open_orders(self, symbol: str,
+                              remote_order_ids: Iterable[str]) -> None:
+        """用交易所当前委托快照清除本地已经失效的未成交委托。"""
+        ids = tuple(dict.fromkeys(
+            str(value) for value in remote_order_ids if value not in (None, "")))
+        with self._connect() as connection:
+            params: tuple = (symbol.upper(),)
+            condition = ""
+            if ids:
+                placeholders = ", ".join("?" for _ in ids)
+                condition = f" AND order_id NOT IN ({placeholders})"
+                params += ids
+            connection.execute(
+                "UPDATE orders SET status='CANCELED', expired_at=?, updated_at=? "
+                "WHERE exchange='binance' AND symbol=? "
+                "AND status IN ('NEW','PARTIALLY_FILLED')" + condition,
+                (_utc_now(), _utc_now()) + params,
+            )
+
     def rows(self, query: str, params: tuple = ()) -> list[dict]:
         with self._connect() as connection:
             return [dict(row) for row in connection.execute(query, params).fetchall()]
@@ -606,7 +661,7 @@ class TradingDatabase:
             "SELECT * FROM orders WHERE status IN ('NEW','PARTIALLY_FILLED') "
             "ORDER BY updated_at DESC")
 
-    def order_history(self) -> list[dict]:
+    def order_history(self, limit: int = 10) -> list[dict]:
         return self.rows(
             "SELECT * FROM orders WHERE status NOT IN ('NEW','PARTIALLY_FILLED') "
-            "ORDER BY updated_at DESC")
+            "ORDER BY updated_at DESC LIMIT ?", (max(int(limit), 1),))
