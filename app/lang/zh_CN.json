@@ -39,7 +39,7 @@
   "live_start_trading": "开始交易",
   "live_close_trading": "关闭交易",
   "live_stop_trading": "停止",
-  "realtime_strategy_capital_updated": "策略账户总余额已更新：本次已实现盈亏 {pnl}，最新总余额 {capital}",
+  "realtime_strategy_capital_updated": "策略账户总余额已更新：本次净盈亏 {pnl}，最新总余额 {capital}",
   "realtime_time_position_closed": "最长持仓到期：已在 K线 #{kline} 市价平掉 {symbol}",
   "realtime_time_close_failed": "最长持仓到期平仓失败：{err}",
 
@@ -130,6 +130,7 @@
   "col_exit_price": "平仓价",
   "col_pnl": "盈亏",
   "col_fee": "手续费",
+  "col_net_pnl": "净盈亏",
   "type_tp": "百分比止盈",
   "type_sl": "百分比止损",
   "type_reverse": "反转止盈",

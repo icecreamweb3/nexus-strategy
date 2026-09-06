@@ -1,4 +1,4 @@
-from app.client.binance_client import BinanceClient
+from app.client.binance_client import BinanceClient, _log_filled_trade_response
 
 
 class FakePositionClient:
@@ -35,6 +35,35 @@ class FakePositionClient:
     def get_order_status(self, symbol, order_id):
         self.status_calls.append((symbol, order_id))
         return {"symbol": symbol, "orderId": int(order_id), "status": "FILLED"}
+
+
+def test_filled_trade_log_contains_fee_fields_but_not_credentials(monkeypatch):
+    messages = []
+
+    class FakeLogger:
+        def info(self, message, *args):
+            messages.append(message % args)
+
+        def debug(self, message, *args):
+            messages.append(message % args)
+
+    monkeypatch.setattr(
+        "app.client.binance_client.get_logger", lambda: FakeLogger())
+
+    _log_filled_trade_response("get_user_trades", {
+        "symbol": "BTCUSDT", "limit": 20,
+        "timestamp": 123, "signature": "secret",
+    }, [{
+        "id": 1, "orderId": 2, "symbol": "BTCUSDT", "price": "80000",
+        "qty": "0.006", "commission": "0.144",
+        "commissionAsset": "USDT", "realizedPnl": "1.2",
+    }])
+
+    output = "\n".join(messages)
+    assert "commission': '0.144'" in output
+    assert "commissionAsset': 'USDT'" in output
+    assert "signature" not in output
+    assert "secret" not in output
 
 
 def test_close_all_positions_closes_one_way_and_hedge_positions():

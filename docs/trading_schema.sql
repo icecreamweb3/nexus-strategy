@@ -130,6 +130,15 @@ CREATE TABLE IF NOT EXISTS order_trade_links (
     trade_id INTEGER NOT NULL REFERENCES trades (id)
 );
 
+-- 每个平仓周期只更新一次策略余额；realized_pnl 保存扣除手续费后的净盈亏。
+CREATE TABLE IF NOT EXISTS strategy_balance_events (
+    close_order_id       TEXT PRIMARY KEY,
+    position_history_id  INTEGER NOT NULL UNIQUE
+                         REFERENCES positions_history (id),
+    realized_pnl         REAL NOT NULL,
+    applied_at           TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE UNIQUE INDEX IF NOT EXISTS ux_orders_exchange_order_id
     ON orders (exchange, order_id)
     WHERE order_id IS NOT NULL;

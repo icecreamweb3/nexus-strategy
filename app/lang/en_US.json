@@ -39,7 +39,7 @@
   "live_start_trading": "Start Trading",
   "live_close_trading": "Close Trading",
   "live_stop_trading": "Stop",
-  "realtime_strategy_capital_updated": "Strategy balance updated: realized PnL {pnl}, new balance {capital}",
+  "realtime_strategy_capital_updated": "Strategy balance updated: net PnL {pnl}, new balance {capital}",
   "realtime_time_position_closed": "Max holding period reached: closed {symbol} at market on K-line #{kline}",
   "realtime_time_close_failed": "Failed to close at max holding period: {err}",
 
@@ -131,6 +131,7 @@
   "col_exit_price": "Exit Price",
   "col_pnl": "PnL",
   "col_fee": "Fee",
+  "col_net_pnl": "Net PnL",
   "type_tp": "Take Profit (%)",
   "type_sl": "Stop Loss (%)",
   "type_reverse": "Reversal TP",

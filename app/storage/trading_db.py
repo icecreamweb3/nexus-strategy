@@ -558,7 +558,8 @@ class TradingDatabase:
                     abs(_float(fill.get("qty"))) * _float(fill.get("price"))
                     for fill in fills) / quantity
                 realized_pnl = sum(_float(fill.get("realizedPnl")) for fill in fills)
-                commission = sum(_float(fill.get("commission")) for fill in fills)
+                commission = sum(
+                    _float(fill.get("commission")) for fill in fills)
                 commission_asset = next((
                     fill.get("commissionAsset") for fill in reversed(fills)
                     if fill.get("commissionAsset")), None)
@@ -608,7 +609,8 @@ class TradingDatabase:
         resolved = 0
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT id, close_order_id, realized_pnl FROM positions_history "
+                "SELECT id, close_order_id, realized_pnl, commission "
+                "FROM positions_history "
                 f"WHERE close_order_id IN ({placeholders})", ids,
             ).fetchall()
             for row in rows:
@@ -617,11 +619,14 @@ class TradingDatabase:
                     "INSERT OR IGNORE INTO strategy_balance_events "
                     "(close_order_id, position_history_id, realized_pnl, applied_at) "
                     "VALUES (?, ?, ?, ?)",
-                    (row["close_order_id"], row["id"], row["realized_pnl"],
+                    (row["close_order_id"], row["id"],
+                     float(row["realized_pnl"] or 0)
+                     - float(row["commission"] or 0),
                      _utc_now()),
                 )
                 if cursor.rowcount:
-                    total += float(row["realized_pnl"] or 0)
+                    total += float(row["realized_pnl"] or 0) \
+                        - float(row["commission"] or 0)
         return total, resolved
 
     def reconcile_open_orders(self, symbol: str,

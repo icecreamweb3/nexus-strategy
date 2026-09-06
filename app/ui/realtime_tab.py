@@ -216,7 +216,7 @@ class RealtimeStrategyTab(BacktestTab):
         layout = QVBoxLayout(box)
         self.records_tabs = QTabWidget()
         self.position_table = self._new_record_table(10)
-        self.position_history_table = self._new_record_table(9)
+        self.position_history_table = self._new_record_table(10)
         self.open_orders_table = self._new_record_table(10)
         self.order_history_table = self._new_record_table(10)
         self.records_tabs.addTab(self.position_table, "")
@@ -287,7 +287,8 @@ class RealtimeStrategyTab(BacktestTab):
         self.position_history_table.setHorizontalHeaderLabels([
             tr("live_symbol"), tr("live_side"), tr("col_entry_price"),
             tr("col_exit_price"), tr("col_qty"), tr("col_pnl"),
-            tr("col_fee"), tr("col_position_mode"), tr("col_time"),
+            tr("col_fee"), tr("col_net_pnl"), tr("col_position_mode"),
+            tr("col_time"),
         ])
         self.open_orders_table.setHorizontalHeaderLabels([
             tr("col_order_id"), tr("live_symbol"), tr("live_side"),
@@ -1154,8 +1155,10 @@ class RealtimeStrategyTab(BacktestTab):
             "symbol", "side", lambda r: n(r["entry_price"], 2),
             lambda r: n(r["close_price"], 2), lambda r: n(r["quantity"]),
             lambda r: n(r["realized_pnl"]), lambda r: n(r["commission"]),
+            lambda r: n(float(r["realized_pnl"] or 0)
+                        - float(r["commission"] or 0)),
             "position_mode", lambda r: local_time(r["updated_at"]),
-        ], pnl_columns=(5,))
+        ], pnl_columns=(5, 7))
         self._fill_table(self.open_orders_table, self._db.current_orders(), [
             "order_id", "symbol", "trade_direction", "action_type", "order_type",
             lambda r: n(r["price"], 2), lambda r: n(r["quantity"]),

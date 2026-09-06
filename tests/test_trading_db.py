@@ -128,8 +128,15 @@ def test_user_trades_rebuild_closed_position_and_update_order(tmp_path):
     assert len(database.position_history()) == 1
 
     pnl, count = database.claim_position_realized_pnl(["2002"])
-    assert (pnl, count) == (10, 1)
+    assert (pnl, count) == (9.39, 1)
     assert database.claim_position_realized_pnl(["2002"]) == (0, 1)
+
+
+def test_commission_uses_raw_order_event_value():
+    values = TradingDatabase._order_values(_order(
+        "FILLED", fee="0.0006"))
+
+    assert values["commission"] == 0.0006
 
 
 def test_websocket_limit_update_keeps_saved_tp_classification(tmp_path):
