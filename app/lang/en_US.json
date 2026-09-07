@@ -16,6 +16,7 @@
   "realtime_reconnecting": "Connection lost",
   "realtime_history_empty": "Binance did not return enough closed K-lines",
   "realtime_started": "Live strategy started: {symbol} {interval}, warmed up with {count} K-lines",
+  "realtime_session_resumed": "Previous live strategy resumed: {symbol} {interval}, {positions} open position(s), offline net PnL {pnl}",
   "realtime_ws_error": "K-line WebSocket error: {err}",
   "realtime_position_exists": "An open {symbol} position exists; entry signal skipped",
   "realtime_order_sent": "Sent {side} market order: {symbol}, quantity {quantity} (signal K-line #{kline})",

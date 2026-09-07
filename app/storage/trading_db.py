@@ -133,6 +133,17 @@ CREATE TABLE IF NOT EXISTS strategy_balance_events (
     applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS live_session_state (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    active INTEGER NOT NULL DEFAULT 0,
+    symbol TEXT NOT NULL,
+    interval TEXT NOT NULL,
+    strategy_capital REAL NOT NULL,
+    entry_time_ms INTEGER,
+    started_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE UNIQUE INDEX IF NOT EXISTS ux_orders_exchange_order_id
 ON orders(exchange, order_id) WHERE order_id IS NOT NULL;
 CREATE UNIQUE INDEX IF NOT EXISTS ux_positions_exchange_symbol_side
@@ -628,6 +639,50 @@ class TradingDatabase:
                     total += float(row["realized_pnl"] or 0) \
                         - float(row["commission"] or 0)
         return total, resolved
+
+    def claim_unapplied_session_pnl(
+            self, symbol: str, started_at: str) -> tuple[float, int]:
+        """领取会话开始后离线期间完成、但尚未计入策略余额的净盈亏。"""
+        rows = self.rows(
+            "SELECT h.close_order_id FROM positions_history h "
+            "LEFT JOIN strategy_balance_events e "
+            "ON e.position_history_id=h.id "
+            "WHERE h.symbol=? AND h.updated_at>=? "
+            "AND h.close_order_id IS NOT NULL AND e.position_history_id IS NULL",
+            (symbol.upper(), started_at),
+        )
+        return self.claim_position_realized_pnl(
+            row["close_order_id"] for row in rows)
+
+    def save_live_session(self, *, active: bool, symbol: str, interval: str,
+                          strategy_capital: float, started_at: str,
+                          entry_time_ms: int | None = None) -> None:
+        """持久化实时策略会话，以便进程重启后继续监听。"""
+        with self._connect() as connection:
+            connection.execute(
+                "INSERT INTO live_session_state "
+                "(id, active, symbol, interval, strategy_capital, "
+                "entry_time_ms, started_at, updated_at) "
+                "VALUES (1, ?, ?, ?, ?, ?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET active=excluded.active, "
+                "symbol=excluded.symbol, interval=excluded.interval, "
+                "strategy_capital=excluded.strategy_capital, "
+                "entry_time_ms=excluded.entry_time_ms, "
+                "started_at=excluded.started_at, updated_at=excluded.updated_at",
+                (int(active), symbol.upper(), interval, float(strategy_capital),
+                 entry_time_ms, started_at, _utc_now()),
+            )
+
+    def load_live_session(self) -> dict | None:
+        rows = self.rows("SELECT * FROM live_session_state WHERE id=1")
+        return rows[0] if rows else None
+
+    def deactivate_live_session(self) -> None:
+        with self._connect() as connection:
+            connection.execute(
+                "UPDATE live_session_state SET active=0, updated_at=? WHERE id=1",
+                (_utc_now(),),
+            )
 
     def reconcile_open_orders(self, symbol: str,
                               remote_order_ids: Iterable[str]) -> None:

@@ -70,6 +70,63 @@ def test_live_price_calculates_short_unrealized_pnl():
     assert pnl == pytest.approx(0.2)
 
 
+def test_entry_time_is_mapped_back_to_reloaded_kline_index():
+    klines = [
+        SimpleNamespace(index=1, open_time=1_000),
+        SimpleNamespace(index=2, open_time=2_000),
+        SimpleNamespace(index=3, open_time=3_000),
+    ]
+
+    assert RealtimeStrategyTab._kline_index_for_time(klines, 2_000) == 2
+    assert RealtimeStrategyTab._kline_index_for_time(klines, 3_500) == 4
+    assert RealtimeStrategyTab._kline_index_for_time(klines, 0) == 0
+
+
+def test_window_close_preserves_active_live_session():
+    calls = []
+    price_stream = SimpleNamespace(stop=lambda: calls.append("price-stop"))
+    tab = SimpleNamespace(
+        _price_stream=price_stream,
+        _save_current_settings=lambda: calls.append("settings-save"),
+        _persist_live_session=lambda: calls.append("session-save"),
+        stop_live=lambda preserve_session=False: calls.append(
+            ("live-stop", preserve_session)),
+    )
+
+    RealtimeStrategyTab.close_listener(tab)
+
+    assert calls == [
+        "settings-save", "session-save", "price-stop", ("live-stop", True),
+    ]
+    assert tab._price_stream is None
+
+
+def test_empty_position_evaluates_signal_after_preload():
+    signal = object()
+    placed = []
+    tab = SimpleNamespace(
+        _processor=SimpleNamespace(evaluate_latest_closed=lambda: signal),
+        _place_signal_order=placed.append,
+    )
+
+    RealtimeStrategyTab._evaluate_initial_signal_when_flat(tab, False)
+
+    assert placed == [signal]
+
+
+def test_existing_position_skips_initial_signal_after_preload():
+    evaluated = []
+    tab = SimpleNamespace(
+        _processor=SimpleNamespace(
+            evaluate_latest_closed=lambda: evaluated.append(True)),
+        _place_signal_order=lambda _signal: None,
+    )
+
+    RealtimeStrategyTab._evaluate_initial_signal_when_flat(tab, True)
+
+    assert evaluated == []
+
+
 def test_order_time_is_displayed_in_system_local_timezone():
     utc_time = datetime(2026, 8, 29, 4, 31, 30, tzinfo=timezone.utc)
     expected = utc_time.astimezone().strftime("%Y-%m-%d %H:%M:%S")
@@ -115,6 +172,7 @@ def test_zero_pnl_protection_exit_still_marks_exit_kline():
         _gateway=SimpleNamespace(client=client),
         _entry_kline_index=4,
         _update_strategy_capital_label=lambda: None,
+        _persist_live_session=lambda: None,
         _record_log=lambda *_args: None,
         _sync_user_trades=lambda *_args, **_kwargs: None,
         _db=SimpleNamespace(
@@ -143,6 +201,7 @@ def test_strategy_capital_uses_claimed_position_history_pnl():
         _gateway=SimpleNamespace(client=client),
         _entry_kline_index=4,
         _update_strategy_capital_label=lambda: None,
+        _persist_live_session=lambda: None,
         _record_log=lambda *_args: None,
         _sync_user_trades=lambda *_args, **_kwargs: None,
         _db=SimpleNamespace(

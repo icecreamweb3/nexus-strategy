@@ -16,6 +16,7 @@
   "realtime_reconnecting": "连接已断开",
   "realtime_history_empty": "Binance 未返回足够的已收盘K线",
   "realtime_started": "实时策略已启动：{symbol} {interval}，已预热 {count} 根K线",
+  "realtime_session_resumed": "已恢复上次实时策略：{symbol} {interval}，当前持仓 {positions} 个，离线期间净盈亏 {pnl}",
   "realtime_ws_error": "K线 WebSocket 异常：{err}",
   "realtime_position_exists": "{symbol} 已有持仓，跳过本次开仓信号",
   "realtime_order_sent": "已发送 {side} 市价单：{symbol}，数量 {quantity}（信号K线 #{kline}）",

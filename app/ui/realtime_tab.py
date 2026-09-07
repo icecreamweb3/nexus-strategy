@@ -46,6 +46,8 @@ class RealtimeStrategyTab(BacktestTab):
         self._processed_trade_ids = set()
         self._pending_close_order_ids = set()
         self._entry_kline_index = None
+        self._entry_time_ms = None
+        self._session_started_at = None
         self._exit_since_last_closed_kline = False
         self._pending_protection_exit = False
         self._latest_close = None
@@ -67,6 +69,7 @@ class RealtimeStrategyTab(BacktestTab):
         QTimer.singleShot(
             100, lambda: self._refresh_account(
                 show_errors=False, sync_history=True))
+        QTimer.singleShot(300, self._resume_live_session)
         self._account_refresh_timer = QTimer(self)
         self._account_refresh_timer.setInterval(15_000)
         self._account_refresh_timer.timeout.connect(self._auto_refresh_account)
@@ -313,9 +316,11 @@ class RealtimeStrategyTab(BacktestTab):
         self.cmb_direction.setCurrentIndex(index)
         self.cmb_direction.blockSignals(False)
 
-    def _start_live(self):
+    def _start_live(self, resume_session=None):
         if self._running:
             return
+        resume_session = resume_session \
+            if isinstance(resume_session, dict) else None
         config = load_config()
         if not config.has_credentials:
             QMessageBox.warning(self, tr("app_title"), tr("live_no_credentials"))
@@ -362,11 +367,18 @@ class RealtimeStrategyTab(BacktestTab):
             self._kline_stream = stream
             self.klines = processor.klines
             self._running = True
-            self._strategy_capital = float(order.total_capital)
+            self._strategy_capital = float(
+                resume_session["strategy_capital"]
+                if resume_session else order.total_capital)
+            self._session_started_at = (
+                resume_session["started_at"] if resume_session
+                else datetime.now(timezone.utc).isoformat(timespec="seconds"))
             self._pending_realized_pnl = 0.0
             self._processed_trade_ids.clear()
             self._pending_close_order_ids.clear()
             self._entry_kline_index = None
+            self._entry_time_ms = (
+                resume_session.get("entry_time_ms") if resume_session else None)
             self._exit_since_last_closed_kline = False
             self._pending_protection_exit = False
             self._update_strategy_capital_label()
@@ -376,10 +388,36 @@ class RealtimeStrategyTab(BacktestTab):
             self.cmb_interval.setEnabled(False)
             self.params_widget.setEnabled(False)
             stream.start()
-            initial_signal = processor.evaluate_latest_closed()
-            if initial_signal is not None:
-                self._place_signal_order(initial_signal)
-            self._refresh_account(show_errors=False, sync_history=True)
+            if not self._refresh_account(
+                    show_errors=False, sync_history=True):
+                raise RuntimeError("无法同步 Binance 当前账户状态")
+            has_position = gateway.client.has_open_position(symbol)
+            if has_position is None:
+                raise RuntimeError(f"无法确认 {symbol} 当前持仓状态")
+            positions = gateway.client.get_positions(symbol) \
+                if has_position else []
+            if has_position and not positions:
+                raise RuntimeError(f"{symbol} 当前持仓数据不完整")
+            if resume_session:
+                pnl, claimed = self._db.claim_unapplied_session_pnl(
+                    symbol, self._session_started_at)
+                if claimed:
+                    self._strategy_capital += pnl
+                    self._update_strategy_capital_label()
+                if positions:
+                    if self._entry_time_ms is None:
+                        self._entry_time_ms = self._position_entry_time_ms(
+                            positions[0])
+                    self._entry_kline_index = self._kline_index_for_time(
+                        self.klines, self._entry_time_ms)
+                else:
+                    self._entry_time_ms = None
+                self._record_log(tr(
+                    "realtime_session_resumed", symbol=symbol,
+                    interval=interval, positions=len(positions),
+                    pnl=f"{pnl:+.4f}"), True)
+            self._persist_live_session()
+            self._evaluate_initial_signal_when_flat(has_position)
             get_logger().info(
                 "实时策略启动: %s %s, 所需预热K线=%d, 实际=%d",
                 symbol, interval, required_bars, len(klines))
@@ -387,16 +425,15 @@ class RealtimeStrategyTab(BacktestTab):
                                 count=len(klines)), True)
             self.retranslate()
         except Exception as exc:  # noqa: BLE001
-            if self._kline_stream is not None:
-                self._kline_stream.stop()
-            self._gateway = None
-            self._processor = None
-            self._kline_stream = None
             self._record_log(tr("live_error", err=exc), True)
-            self._close_live_log()
             QMessageBox.warning(self, tr("app_title"), tr("live_error", err=exc))
+            # 自动恢复失败时保留 active 标记，下次启动仍会继续尝试；手工
+            # 启动失败则视为未启动。两种情况都完整恢复界面可编辑状态。
+            self.stop_live(preserve_session=resume_session is not None)
 
-    def stop_live(self):
+    def stop_live(self, preserve_session: bool = False):
+        if not preserve_session:
+            self._db.deactivate_live_session()
         self._running = False
         if self._kline_stream is not None:
             self._kline_stream.stop()
@@ -409,6 +446,8 @@ class RealtimeStrategyTab(BacktestTab):
         self._processed_trade_ids.clear()
         self._pending_close_order_ids.clear()
         self._entry_kline_index = None
+        self._entry_time_ms = None
+        self._session_started_at = None
         self._exit_since_last_closed_kline = False
         self._pending_protection_exit = False
         self._update_strategy_capital_label()
@@ -572,6 +611,8 @@ class RealtimeStrategyTab(BacktestTab):
                     or cancel_summary["remaining_algo"]:
                 raise RuntimeError("TIME 平仓后保护委托未全部撤销")
             self._entry_kline_index = None
+            self._entry_time_ms = None
+            self._persist_live_session()
             self._reconcile_strategy_capital(symbol)
             self._record_log(tr(
                 "realtime_time_position_closed", symbol=symbol,
@@ -604,6 +645,31 @@ class RealtimeStrategyTab(BacktestTab):
         self._price_stream = stream
         self.lbl_latest_value.setText(f"{symbol} PERP  —")
         stream.start()
+
+    def _resume_live_session(self):
+        """启动完成后恢复上次因软件退出而中断的实时监听。"""
+        if self._running:
+            return
+        session = self._db.load_live_session()
+        if not session or not session.get("active"):
+            return
+        symbol = str(session.get("symbol") or "").upper()
+        interval = str(session.get("interval") or "")
+        if not symbol or interval not in INTERVALS:
+            get_logger().warning("无法恢复实时策略：会话市场参数无效 %s", session)
+            return
+        self.cmb_symbol.setCurrentText(symbol)
+        self.cmb_interval.setCurrentText(interval)
+        get_logger().info("正在恢复实时策略会话: %s %s", symbol, interval)
+        self._start_live(session)
+
+    def _evaluate_initial_signal_when_flat(self, has_position: bool) -> None:
+        """启动/恢复为空仓时，使用预热数据判断最新收盘K线信号。"""
+        if has_position or self._processor is None:
+            return
+        initial_signal = self._processor.evaluate_latest_closed()
+        if initial_signal is not None:
+            self._place_signal_order(initial_signal)
 
     def _on_symbol_changed(self, *_args):
         self._restart_price_stream()
@@ -668,6 +734,8 @@ class RealtimeStrategyTab(BacktestTab):
             result = self._gateway.market_order(
                 symbol, side, quantity, position_side=position_side)
             self._entry_kline_index = signal.kline.index + 1
+            self._entry_time_ms = self._order_event_time_ms(result)
+            self._persist_live_session()
             self._insert_order(result, symbol, side)
             order_id = result.get("orderId")
             if order_id is None:
@@ -1026,16 +1094,71 @@ class RealtimeStrategyTab(BacktestTab):
         self._strategy_capital += pnl
         self._pending_realized_pnl = 0.0
         self._entry_kline_index = None
+        self._entry_time_ms = None
         if self._pending_protection_exit:
             self._exit_since_last_closed_kline = True
         self._pending_protection_exit = False
         self._update_strategy_capital_label()
+        self._persist_live_session()
         # 完全平仓后撤掉另一侧仍存活的 TP/SL，避免旧保护单遗留。
         self._gateway.client.cancel_all_open_orders(symbol)
         if pnl != 0:
             self._record_log(tr(
                 "realtime_strategy_capital_updated", pnl=f"{pnl:+.2f}",
                 capital=f"{self._strategy_capital:.2f}"), True)
+
+    @staticmethod
+    def _order_event_time_ms(order: dict) -> int:
+        for key in ("T", "updateTime", "transactTime", "time"):
+            try:
+                value = int(float(order.get(key)))
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                return value
+        return int(datetime.now(timezone.utc).timestamp() * 1000)
+
+    @staticmethod
+    def _position_entry_time_ms(position: dict) -> int | None:
+        for key in ("openTime", "updateTime"):
+            try:
+                value = int(float(position.get(key)))
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                return value
+        return None
+
+    @staticmethod
+    def _kline_index_for_time(klines, timestamp_ms) -> int | None:
+        """把持久化的入场时间映射回本次预热K线的连续编号。"""
+        if not klines or timestamp_ms in (None, ""):
+            return None
+        target = int(timestamp_ms)
+        keys = [LiveSignalProcessor._time_key(kline) for kline in klines]
+        if target > keys[-1]:
+            return klines[-1].index + 1
+        for kline, key in zip(klines, keys):
+            if key >= target:
+                if key == keys[0] and len(keys) > 1 and target < key:
+                    step = max(keys[1] - keys[0], 1)
+                    missing = (key - target + step - 1) // step
+                    return kline.index - missing
+                return kline.index
+        return klines[-1].index + 1
+
+    def _persist_live_session(self) -> None:
+        if not self._running or self._strategy_capital is None \
+                or not self._session_started_at:
+            return
+        self._db.save_live_session(
+            active=True,
+            symbol=self.cmb_symbol.currentText().strip().upper(),
+            interval=self.cmb_interval.currentText(),
+            strategy_capital=self._strategy_capital,
+            entry_time_ms=self._entry_time_ms,
+            started_at=self._session_started_at,
+        )
 
     @staticmethod
     def _number_from_label(text: str):
@@ -1209,7 +1332,8 @@ class RealtimeStrategyTab(BacktestTab):
 
     def close_listener(self):
         self._save_current_settings()
+        self._persist_live_session()
         if self._price_stream is not None:
             self._price_stream.stop()
             self._price_stream = None
-        self.stop_live()
+        self.stop_live(preserve_session=True)

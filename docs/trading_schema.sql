@@ -139,6 +139,18 @@ CREATE TABLE IF NOT EXISTS strategy_balance_events (
     applied_at           TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+-- 实时策略运行会话；active=1 时软件重启后自动恢复监听，不会主动平仓或撤单。
+CREATE TABLE IF NOT EXISTS live_session_state (
+    id                INTEGER PRIMARY KEY CHECK (id = 1),
+    active            INTEGER NOT NULL DEFAULT 0,
+    symbol            TEXT    NOT NULL,
+    interval          TEXT    NOT NULL,
+    strategy_capital  REAL    NOT NULL,
+    entry_time_ms     INTEGER,
+    started_at        TEXT    NOT NULL,
+    updated_at        TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE UNIQUE INDEX IF NOT EXISTS ux_orders_exchange_order_id
     ON orders (exchange, order_id)
     WHERE order_id IS NOT NULL;

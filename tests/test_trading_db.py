@@ -181,6 +181,49 @@ def test_order_history_defaults_to_latest_ten(tmp_path):
     assert [row["order_id"] for row in history[:2]] == ["11", "10"]
 
 
+def test_live_session_state_round_trip_and_deactivation(tmp_path):
+    database = TradingDatabase(str(tmp_path / "trading.sqlite3"))
+
+    database.save_live_session(
+        active=True, symbol="btcusdt", interval="1h",
+        strategy_capital=123.45, entry_time_ms=1_700_000_000_000,
+        started_at="2026-09-07T01:00:00+00:00",
+    )
+
+    session = database.load_live_session()
+    assert session["active"] == 1
+    assert session["symbol"] == "BTCUSDT"
+    assert session["interval"] == "1h"
+    assert session["strategy_capital"] == 123.45
+    assert session["entry_time_ms"] == 1_700_000_000_000
+
+    database.deactivate_live_session()
+    assert database.load_live_session()["active"] == 0
+
+
+def test_offline_session_pnl_is_claimed_once(tmp_path):
+    database = TradingDatabase(str(tmp_path / "trading.sqlite3"))
+    database.sync_user_trades([
+        {
+            "id": 1, "orderId": 10, "symbol": "BTCUSDT", "side": "BUY",
+            "positionSide": "BOTH", "price": "60000", "qty": "0.01",
+            "commission": "0.30", "commissionAsset": "USDT",
+            "realizedPnl": "0", "time": 1_700_000_000_000,
+        },
+        {
+            "id": 2, "orderId": 11, "symbol": "BTCUSDT", "side": "SELL",
+            "positionSide": "BOTH", "price": "61000", "qty": "0.01",
+            "commission": "0.31", "commissionAsset": "USDT",
+            "realizedPnl": "10", "time": 1_700_000_060_000,
+        },
+    ])
+
+    assert database.claim_unapplied_session_pnl(
+        "BTCUSDT", "2023-11-14T00:00:00+00:00") == (9.39, 1)
+    assert database.claim_unapplied_session_pnl(
+        "BTCUSDT", "2023-11-14T00:00:00+00:00") == (0, 0)
+
+
 def test_open_order_snapshot_removes_stale_local_orders(tmp_path):
     database = TradingDatabase(str(tmp_path / "trading.sqlite3"))
     database.upsert_order(_order("NEW", orderId="1"))
