@@ -58,6 +58,7 @@ class RealtimeStrategyTab(BacktestTab):
         self._db = TradingDatabase()
         super().__init__(parent)
         self._restore_market_settings()
+        self._restore_strategy_capital_display()
         self.cmb_symbol.currentIndexChanged.connect(self._on_symbol_changed)
         if self.cmb_symbol.lineEdit() is not None:
             self.cmb_symbol.lineEdit().editingFinished.connect(
@@ -95,6 +96,8 @@ class RealtimeStrategyTab(BacktestTab):
             checkbox.stateChanged.connect(self._save_current_settings)
         for spin in spins:
             spin.valueChanged.connect(self._save_current_settings)
+        self.sp_total_capital.valueChanged.connect(
+            self._on_total_capital_changed)
         self.cmb_direction.currentIndexChanged.connect(
             self._save_current_settings)
         self.cmb_symbol.currentTextChanged.connect(
@@ -127,6 +130,27 @@ class RealtimeStrategyTab(BacktestTab):
             )
         except (OSError, ValueError) as exc:
             get_logger().warning("自动保存参数失败: %s", exc)
+
+    def _restore_strategy_capital_display(self) -> None:
+        """启动时恢复策略余额；没有活动会话时使用已保存的总资金。"""
+        session = self._db.load_live_session()
+        self._strategy_capital = self._initial_strategy_capital(
+            session, self.sp_total_capital.value())
+        self._update_strategy_capital_label()
+
+    @staticmethod
+    def _initial_strategy_capital(session, configured_capital: float) -> float:
+        if session and session.get("active") \
+                and session.get("strategy_capital") is not None:
+            return float(session["strategy_capital"])
+        return float(configured_capital)
+
+    def _on_total_capital_changed(self, value: float) -> None:
+        """停止状态下，总资金参数就是下一次交易使用的策略账户余额。"""
+        if self._running:
+            return
+        self._strategy_capital = float(value)
+        self._update_strategy_capital_label()
 
     def _build_ui(self):
         root = QVBoxLayout(self)
@@ -462,7 +486,6 @@ class RealtimeStrategyTab(BacktestTab):
         self._processor = None
         self._gateway = None
         self._placing_order = False
-        self._strategy_capital = None
         self._pending_realized_pnl = 0.0
         self._processed_trade_ids.clear()
         self._pending_close_order_ids.clear()

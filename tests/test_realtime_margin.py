@@ -127,6 +127,22 @@ def test_existing_position_skips_initial_signal_after_preload():
     assert evaluated == []
 
 
+def test_startup_displays_active_session_strategy_capital():
+    session = {"active": 1, "strategy_capital": 11234.56}
+
+    value = RealtimeStrategyTab._initial_strategy_capital(session, 10000)
+
+    assert value == 11234.56
+
+
+def test_startup_displays_configured_capital_without_active_session():
+    inactive_session = {"active": 0, "strategy_capital": 11234.56}
+
+    assert RealtimeStrategyTab._initial_strategy_capital(
+        inactive_session, 10000) == 10000
+    assert RealtimeStrategyTab._initial_strategy_capital(None, 8000) == 8000
+
+
 def test_existing_position_skips_all_position_mode_changes():
     calls = []
     client = SimpleNamespace(
