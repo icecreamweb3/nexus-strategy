@@ -874,6 +874,12 @@ class BinanceClient:
 
     def set_cross_margin(self, symbol: str) -> bool:
         """Ensure the symbol uses crossed margin."""
+        has_position = self.has_open_position(symbol)
+        if has_position is not False:
+            reason = "存在持仓" if has_position else "无法确认持仓状态"
+            logger.info(
+                "Skip changing margin type for %s: %s", symbol.upper(), reason)
+            return False
         try:
             self.client.futures_change_margin_type(
                 symbol=symbol.upper(), marginType="CROSSED")
@@ -908,6 +914,11 @@ class BinanceClient:
     
     def set_position_mode(self, hedge_mode: bool = False) -> bool:
         """Set position mode: True = Hedge Mode, False = One-way Mode"""
+        has_position = self.has_any_open_position()
+        if has_position is not False:
+            reason = "存在持仓" if has_position else "无法确认持仓状态"
+            logger.info("Skip changing position mode: %s", reason)
+            return False
         try:
             self.client.futures_change_position_mode(dualSidePosition=hedge_mode)
             return True
@@ -929,6 +940,11 @@ class BinanceClient:
 
     def set_multi_assets_mode(self, multi_assets_mode: bool = False) -> bool:
         """Set margin asset mode: True = Multi-Assets Mode, False = Single-Asset Mode."""
+        has_position = self.has_any_open_position()
+        if has_position is not False:
+            reason = "存在持仓" if has_position else "无法确认持仓状态"
+            logger.info("Skip changing margin asset mode: %s", reason)
+            return False
         try:
             self.client.futures_change_multi_assets_mode(multiAssetsMargin=multi_assets_mode)
             return True
@@ -2888,6 +2904,18 @@ class BinanceClient:
             )
         except Exception as e:
             logger.warning(f"Failed to check open position for {symbol}: {e}")
+            return None
+
+    def has_any_open_position(self) -> Optional[bool]:
+        """查询账户是否有任意持仓；请求失败时返回 None，禁止修改账户模式。"""
+        try:
+            positions = self.client.futures_position_information()
+            return any(
+                abs(float(item.get('positionAmt', 0) or 0)) > 0
+                for item in (positions or [])
+            )
+        except Exception as e:
+            logger.warning(f"Failed to check account open positions: {e}")
             return None
     
     def get_open_orders(self, symbol: str | None = None) -> List[dict]:

@@ -127,6 +127,48 @@ def test_existing_position_skips_initial_signal_after_preload():
     assert evaluated == []
 
 
+def test_existing_position_skips_all_position_mode_changes():
+    calls = []
+    client = SimpleNamespace(
+        get_position_mode=lambda: calls.append("get-position-mode"),
+        set_position_mode=lambda _mode: calls.append("set-position-mode"),
+        get_multi_assets_mode=lambda: calls.append("get-assets-mode"),
+        set_multi_assets_mode=lambda _mode: calls.append("set-assets-mode"),
+        set_cross_margin=lambda _symbol: calls.append("set-cross-margin"),
+        set_leverage=lambda symbol, leverage: calls.append(
+            ("set-leverage", symbol, leverage)) or True,
+    )
+
+    RealtimeStrategyTab._configure_exchange_settings(
+        client, "BTCUSDT", has_account_position=True,
+        has_symbol_position=True)
+
+    assert calls == [("set-leverage", "BTCUSDT", 100)]
+
+
+def test_other_symbol_position_only_skips_account_level_mode_changes():
+    calls = []
+    client = SimpleNamespace(
+        get_position_mode=lambda: calls.append("get-position-mode"),
+        set_position_mode=lambda _mode: calls.append("set-position-mode"),
+        get_multi_assets_mode=lambda: calls.append("get-assets-mode"),
+        set_multi_assets_mode=lambda _mode: calls.append("set-assets-mode"),
+        set_cross_margin=lambda symbol: calls.append(
+            ("set-cross-margin", symbol)) or True,
+        set_leverage=lambda symbol, leverage: calls.append(
+            ("set-leverage", symbol, leverage)) or True,
+    )
+
+    RealtimeStrategyTab._configure_exchange_settings(
+        client, "BTCUSDT", has_account_position=True,
+        has_symbol_position=False)
+
+    assert calls == [
+        ("set-cross-margin", "BTCUSDT"),
+        ("set-leverage", "BTCUSDT", 100),
+    ]
+
+
 def test_order_time_is_displayed_in_system_local_timezone():
     utc_time = datetime(2026, 8, 29, 4, 31, 30, tzinfo=timezone.utc)
     expected = utc_time.astimezone().strftime("%Y-%m-%d %H:%M:%S")

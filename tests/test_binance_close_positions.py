@@ -37,6 +37,35 @@ class FakePositionClient:
         return {"symbol": symbol, "orderId": int(order_id), "status": "FILLED"}
 
 
+def test_mode_setters_do_not_send_changes_while_positions_exist():
+    calls = []
+
+    class RawClient:
+        @staticmethod
+        def futures_position_information(**_kwargs):
+            return [{"symbol": "BTCUSDT", "positionAmt": "0.001"}]
+
+        @staticmethod
+        def futures_change_position_mode(**_kwargs):
+            calls.append("position-mode")
+
+        @staticmethod
+        def futures_change_multi_assets_mode(**_kwargs):
+            calls.append("assets-mode")
+
+        @staticmethod
+        def futures_change_margin_type(**_kwargs):
+            calls.append("margin-type")
+
+    client = object.__new__(BinanceClient)
+    client.client = RawClient()
+
+    assert client.set_position_mode(False) is False
+    assert client.set_multi_assets_mode(False) is False
+    assert client.set_cross_margin("BTCUSDT") is False
+    assert calls == []
+
+
 def test_filled_trade_log_contains_fee_fields_but_not_credentials(monkeypatch):
     messages = []
 

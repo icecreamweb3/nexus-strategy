@@ -339,19 +339,14 @@ class RealtimeStrategyTab(BacktestTab):
             klines = gateway.recent_closed_klines(symbol, interval, history_limit)
             if len(klines) < required_bars:
                 raise RuntimeError(tr("realtime_history_empty"))
-            # 界面杠杆只放大名义下单金额；交易所账户始终使用约定配置。
-            if gateway.client.get_position_mode() is not False:
-                if not gateway.client.set_position_mode(False) \
-                        or gateway.client.get_position_mode() is not False:
-                    raise RuntimeError("无法设置单向持仓模式")
-            if gateway.client.get_multi_assets_mode() is not False:
-                if not gateway.client.set_multi_assets_mode(False) \
-                        or gateway.client.get_multi_assets_mode() is not False:
-                    raise RuntimeError("无法设置单币保证金模式")
-            if not gateway.client.set_cross_margin(symbol):
-                raise RuntimeError(f"无法设置 {symbol} 全仓模式")
-            if not gateway.client.set_leverage(symbol, EXCHANGE_LEVERAGE):
-                raise RuntimeError(f"无法设置 {symbol} {EXCHANGE_LEVERAGE}X 杠杆")
+            has_account_position = gateway.client.has_any_open_position()
+            if has_account_position is None:
+                raise RuntimeError("无法确认 Binance 账户当前持仓状态")
+            has_position = gateway.client.has_open_position(symbol)
+            if has_position is None:
+                raise RuntimeError(f"无法确认 {symbol} 当前持仓状态")
+            self._configure_exchange_settings(
+                gateway.client, symbol, has_account_position, has_position)
             processor = LiveSignalProcessor(
                 klines, strategy, order, self._record_log,
                 lambda key, **kwargs: i18n().tr_for(i18n().lang, key, **kwargs))
@@ -391,9 +386,6 @@ class RealtimeStrategyTab(BacktestTab):
             if not self._refresh_account(
                     show_errors=False, sync_history=True):
                 raise RuntimeError("无法同步 Binance 当前账户状态")
-            has_position = gateway.client.has_open_position(symbol)
-            if has_position is None:
-                raise RuntimeError(f"无法确认 {symbol} 当前持仓状态")
             positions = gateway.client.get_positions(symbol) \
                 if has_position else []
             if has_position and not positions:
@@ -430,6 +422,35 @@ class RealtimeStrategyTab(BacktestTab):
             # 自动恢复失败时保留 active 标记，下次启动仍会继续尝试；手工
             # 启动失败则视为未启动。两种情况都完整恢复界面可编辑状态。
             self.stop_live(preserve_session=resume_session is not None)
+
+    @staticmethod
+    def _configure_exchange_settings(
+            client, symbol: str, has_account_position: bool,
+            has_symbol_position: bool) -> None:
+        """仅在无持仓时修改交易所模式，已有持仓沿用其当前设置。"""
+        # 界面杠杆只放大名义下单金额；交易所账户始终使用约定配置。
+        # Binance 禁止账户有仓位时切换持仓/保证金资产模式。
+        if not has_account_position:
+            if client.get_position_mode() is not False:
+                if not client.set_position_mode(False) \
+                        or client.get_position_mode() is not False:
+                    raise RuntimeError("无法设置单向持仓模式")
+            if client.get_multi_assets_mode() is not False:
+                if not client.set_multi_assets_mode(False) \
+                        or client.get_multi_assets_mode() is not False:
+                    raise RuntimeError("无法设置单币保证金模式")
+        else:
+            get_logger().info("账户已有持仓，跳过持仓模式和保证金资产模式设置")
+
+        # 全仓/逐仓模式属于交易对设置，该交易对已有仓位时不发起修改请求。
+        if not has_symbol_position:
+            if not client.set_cross_margin(symbol):
+                raise RuntimeError(f"无法设置 {symbol} 全仓模式")
+        else:
+            get_logger().info("%s 已有持仓，跳过全仓模式设置", symbol)
+
+        if not client.set_leverage(symbol, EXCHANGE_LEVERAGE):
+            raise RuntimeError(f"无法设置 {symbol} {EXCHANGE_LEVERAGE}X 杠杆")
 
     def stop_live(self, preserve_session: bool = False):
         if not preserve_session:
