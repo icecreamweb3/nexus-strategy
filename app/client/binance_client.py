@@ -54,7 +54,7 @@ logger = logging.getLogger(__name__)
 _TRADE_LOG_FIELDS = (
     "id", "orderId", "symbol", "side", "positionSide", "price", "qty",
     "quoteQty", "realizedPnl", "commission", "commissionAsset", "maker",
-    "time",
+    "commissionValue", "commissionValueAsset", "time",
 )
 
 
@@ -2942,10 +2942,11 @@ class BinanceClient:
             return []
 
     def get_order_history(self, symbol: str, limit: int = 100) -> List[dict]:
-        """Get historical orders enriched with actual commission (fee) per order.
+        """Get orders enriched with fee quantity, asset, and quote-asset value.
 
-        Fetches orders and account trades in two calls, then merges commission by orderId.
-        Each returned dict gains a 'fee' key (float, USDT or native asset value).
+        A commission paid with BNB is a BNB quantity, not a USDT amount.  The
+        corresponding ``commissionValue`` is valued in the traded symbol's
+        quote asset at the fill minute so downstream net PnL stays comparable.
         """
         try:
             orders = self.client.futures_get_all_orders(symbol=symbol, limit=limit)
@@ -2957,26 +2958,115 @@ class BinanceClient:
         # Build commission index: orderId → total commission
         try:
             self.set_timestamp_offset()
-            trades = self.client.futures_account_trades(
-                symbol=symbol, limit=limit) or []
+            trades = self._enrich_trade_fee_values(
+                self.client.futures_account_trades(
+                    symbol=symbol, limit=limit) or [])
             _log_filled_trade_response(
                 "get_order_history", {"symbol": symbol, "limit": limit},
                 trades,
             )
-            fee_by_order: dict[int, float] = {}
+            fees_by_order: dict[str, dict] = {}
             for tr in trades:
                 oid = tr.get("orderId")
                 if oid is not None:
-                    fee_by_order[oid] = fee_by_order.get(oid, 0.0) + float(tr.get("commission", 0) or 0)
+                    fee = fees_by_order.setdefault(str(oid), {
+                        "commission": 0.0, "commissionValue": 0.0,
+                        "assets": set(), "valueAsset": None,
+                    })
+                    fee["commission"] += float(tr.get("commission", 0) or 0)
+                    value = tr.get("commissionValue")
+                    if value is None:
+                        fee["commissionValue"] = None
+                    elif fee["commissionValue"] is not None:
+                        fee["commissionValue"] += float(value)
+                    if tr.get("commissionAsset"):
+                        fee["assets"].add(str(tr["commissionAsset"]).upper())
+                    fee["valueAsset"] = tr.get("commissionValueAsset") \
+                        or fee["valueAsset"]
         except Exception as e:
             logger.debug(f"Failed to get trade fills for fee enrichment ({symbol}): {e}")
-            fee_by_order = {}
+            fees_by_order = {}
 
         for o in orders:
             oid = o.get("orderId")
-            o["fee"] = fee_by_order.get(oid, 0.0)
+            fee = fees_by_order.get(str(oid)) if oid is not None else None
+            if fee is None:
+                o["fee"] = 0.0
+                o["commission"] = 0.0
+                continue
+            assets = sorted(fee["assets"])
+            asset = assets[0] if len(assets) == 1 else "MIXED"
+            o["fee"] = fee["commission"]
+            o["commission"] = fee["commission"]
+            o["commissionAsset"] = asset
+            o["commissionValue"] = fee["commissionValue"]
+            o["commissionValueAsset"] = fee["valueAsset"]
 
         return orders
+
+    @staticmethod
+    def _symbol_quote_asset(symbol: str) -> str:
+        symbol = str(symbol or "").upper()
+        for quote in ("USDT", "USDC", "FDUSD", "BUSD", "TUSD", "BTC", "ETH", "BNB"):
+            if symbol.endswith(quote) and len(symbol) > len(quote):
+                return quote
+        return "USDT"
+
+    def _fee_asset_price(self, asset: str, quote_asset: str,
+                         timestamp_ms: int, trade: dict) -> float | None:
+        """Return one fee asset's value in quote asset at the fill minute."""
+        asset = asset.upper()
+        quote_asset = quote_asset.upper()
+        if asset == quote_asset:
+            return 1.0
+
+        symbol = str(trade.get("symbol", "")).upper()
+        if symbol == f"{asset}{quote_asset}":
+            try:
+                return float(trade.get("price", 0) or 0) or None
+            except (TypeError, ValueError):
+                return None
+
+        minute = int(timestamp_ms) // 60_000 * 60_000
+        cache = getattr(self, "_fee_price_cache", None)
+        if cache is None:
+            cache = self._fee_price_cache = {}
+        cache_key = (asset, quote_asset, minute)
+        if cache_key in cache:
+            return cache[cache_key]
+
+        price = None
+        try:
+            candles = self.client.futures_klines(
+                symbol=f"{asset}{quote_asset}", interval="1m",
+                startTime=minute, endTime=minute + 59_999, limit=1,
+            ) or []
+            if candles:
+                price = float(candles[0][4])
+        except Exception as exc:
+            logger.warning(
+                "Failed to value %s commission in %s at %s: %s",
+                asset, quote_asset, timestamp_ms, exc,
+            )
+        cache[cache_key] = price
+        return price
+
+    def _enrich_trade_fee_values(self, trades: List[dict]) -> List[dict]:
+        """Add quote-asset fee values while preserving native fee quantities."""
+        enriched = []
+        for raw in trades:
+            trade = dict(raw)
+            asset = str(trade.get("commissionAsset", "") or "").upper()
+            quote_asset = self._symbol_quote_asset(trade.get("symbol", ""))
+            commission = float(trade.get("commission", 0) or 0)
+            timestamp_ms = int(float(trade.get("time", 0) or 0))
+            price = self._fee_asset_price(
+                asset, quote_asset, timestamp_ms, trade) if asset else None
+            trade["commissionValue"] = (
+                commission * price if price is not None else None)
+            trade["commissionValueAsset"] = quote_asset
+            enriched.append(trade)
+        return enriched
 
     def get_positions(self, symbol: str | None = None) -> List[dict]:
         """Get current open positions. Filters out zero-quantity entries.
@@ -3128,7 +3218,7 @@ class BinanceClient:
             trades = self.client.futures_account_trades(
                 symbol=symbol, orderId=int(order_id)
             )
-            trades = trades if trades else []
+            trades = self._enrich_trade_fee_values(trades if trades else [])
             _log_filled_trade_response(
                 "get_trade_fills",
                 {"symbol": symbol, "orderId": order_id}, trades,
@@ -3427,7 +3517,8 @@ class BinanceClient:
             if limit:
                 params['limit'] = min(limit, 1000)  # Max 1000 per request
             
-            trades = self.client.futures_account_trades(**params) or []
+            trades = self._enrich_trade_fee_values(
+                self.client.futures_account_trades(**params) or [])
             _log_filled_trade_response("get_user_trades", params, trades)
             return trades
         except Exception as e:

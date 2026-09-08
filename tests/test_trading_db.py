@@ -132,6 +132,57 @@ def test_user_trades_rebuild_closed_position_and_update_order(tmp_path):
     assert database.claim_position_realized_pnl(["2002"]) == (0, 1)
 
 
+def test_bnb_commission_uses_quote_value_for_net_pnl(tmp_path):
+    database = TradingDatabase(str(tmp_path / "trading.sqlite3"))
+    database.upsert_order(_order(
+        "FILLED", orderId="4002", side="SELL", reduceOnly=True,
+        executedQty="0.01", avgPrice="61000"))
+
+    database.sync_user_trades([
+        {
+            "id": 31, "orderId": 4001, "symbol": "BTCUSDT",
+            "side": "BUY", "positionSide": "BOTH", "price": "60000",
+            "qty": "0.01", "commission": "0.0001",
+            "commissionAsset": "BNB", "commissionValue": "0.06",
+            "realizedPnl": "0", "time": 1000,
+        },
+        {
+            "id": 32, "orderId": 4002, "symbol": "BTCUSDT",
+            "side": "SELL", "positionSide": "BOTH", "price": "61000",
+            "qty": "0.01", "commission": "0.0001",
+            "commissionAsset": "BNB", "commissionValue": "0.061",
+            "realizedPnl": "10", "time": 2000,
+        },
+    ])
+
+    history = database.position_history()[0]
+    assert history["commission"] == 0.0002
+    assert history["commission_asset"] == "BNB"
+    assert history["commission_value"] == 0.121
+    assert database.claim_position_realized_pnl(["4002"]) == (9.879, 1)
+
+
+def test_native_fee_without_conversion_is_not_deducted_as_quote_currency(tmp_path):
+    database = TradingDatabase(str(tmp_path / "trading.sqlite3"))
+    database.sync_user_trades([
+        {
+            "id": 41, "orderId": 4101, "symbol": "BTCUSDT",
+            "side": "BUY", "positionSide": "BOTH", "price": "60000",
+            "qty": "0.01", "commission": "0.0001",
+            "commissionAsset": "BNB", "realizedPnl": "0", "time": 1000,
+        },
+        {
+            "id": 42, "orderId": 4102, "symbol": "BTCUSDT",
+            "side": "SELL", "positionSide": "BOTH", "price": "61000",
+            "qty": "0.01", "commission": "0.0001",
+            "commissionAsset": "BNB", "realizedPnl": "10", "time": 2000,
+        },
+    ])
+
+    assert database.position_history()[0]["commission_value"] is None
+    assert database.claim_position_realized_pnl(["4102"]) == (0, 0)
+
+
 def test_commission_uses_raw_order_event_value():
     values = TradingDatabase._order_values(_order(
         "FILLED", fee="0.0006"))

@@ -1,3 +1,4 @@
+import csv
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
@@ -293,3 +294,35 @@ def test_algo_order_is_normalized_for_the_shared_order_table():
     assert normalized["status"] == "NEW"
     assert normalized["stopPrice"] == "59000"
     assert normalized["reduceOnly"] is True
+
+
+def test_position_history_csv_exports_every_database_row(tmp_path, monkeypatch):
+    output = tmp_path / "position_history.csv"
+    rows = [{
+        "symbol": "BTCUSDT", "side": "LONG",
+        "entry_price": 60000 + index, "close_price": 61000 + index,
+        "quantity": 0.01, "realized_pnl": 10.0,
+        "commission": 0.0002, "commission_asset": "BNB",
+        "commission_value": 0.12, "position_mode": "ONE_WAY",
+        "updated_at": f"2026-09-08T00:00:{index:02d}+00:00",
+    } for index in range(12)]
+    messages = []
+    tab = SimpleNamespace(
+        _db=SimpleNamespace(all_position_history=lambda: rows),
+        _format_local_time=lambda value: value,
+    )
+    monkeypatch.setattr(
+        "app.ui.realtime_tab.QFileDialog.getSaveFileName",
+        lambda *_args: (str(output), "CSV (*.csv)"))
+    monkeypatch.setattr(
+        "app.ui.realtime_tab.QMessageBox.information",
+        lambda *_args: messages.append(_args[-1]))
+
+    RealtimeStrategyTab._export_position_history(tab)
+
+    with output.open(encoding="utf-8-sig", newline="") as file:
+        exported = list(csv.reader(file))
+    assert len(exported) == 13
+    assert exported[1][0:2] == ["BTCUSDT", "LONG"]
+    assert float(exported[1][9]) == pytest.approx(9.88)
+    assert "12" in messages[0]

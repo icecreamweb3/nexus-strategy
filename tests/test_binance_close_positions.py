@@ -95,6 +95,41 @@ def test_filled_trade_log_contains_fee_fields_but_not_credentials(monkeypatch):
     assert "secret" not in output
 
 
+def test_bnb_fee_is_valued_in_symbol_quote_asset_at_fill_minute():
+    calls = []
+
+    class RawClient:
+        @staticmethod
+        def futures_klines(**kwargs):
+            calls.append(kwargs)
+            return [[1788367740000, "600", "602", "598", "601", "1"]]
+
+    client = object.__new__(BinanceClient)
+    client.client = RawClient()
+    trades = client._enrich_trade_fee_values([{
+        "symbol": "BTCUSDT", "price": "77244.20", "time": 1788367741177,
+        "commission": "0.00030366", "commissionAsset": "BNB",
+    }])
+
+    assert trades[0]["commissionValue"] == 0.00030366 * 601
+    assert trades[0]["commissionValueAsset"] == "USDT"
+    assert calls == [{
+        "symbol": "BNBUSDT", "interval": "1m",
+        "startTime": 1788367740000, "endTime": 1788367799999, "limit": 1,
+    }]
+
+
+def test_quote_asset_fee_needs_no_price_request():
+    client = object.__new__(BinanceClient)
+    trades = client._enrich_trade_fee_values([{
+        "symbol": "BTCUSDT", "price": "77244.20", "time": 1788367741177,
+        "commission": "0.25", "commissionAsset": "USDT",
+    }])
+
+    assert trades[0]["commissionValue"] == 0.25
+    assert trades[0]["commissionValueAsset"] == "USDT"
+
+
 def test_close_all_positions_closes_one_way_and_hedge_positions():
     client = FakePositionClient()
 

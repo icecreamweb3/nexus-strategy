@@ -1,12 +1,13 @@
 """实时策略页：Binance K线 → 原条件检测 → 合约市价单。"""
 from __future__ import annotations
 
+import csv
 from datetime import datetime, timezone
 
 from PyQt5.QtCore import QTimer
 from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
-    QComboBox, QGridLayout, QGroupBox, QLabel, QMessageBox,
+    QComboBox, QFileDialog, QGridLayout, QGroupBox, QLabel, QMessageBox,
     QPushButton, QTableWidget, QTableWidgetItem, QVBoxLayout,
     QHeaderView, QTabWidget, QHBoxLayout, QWidget,
 )
@@ -243,11 +244,26 @@ class RealtimeStrategyTab(BacktestTab):
         layout = QVBoxLayout(box)
         self.records_tabs = QTabWidget()
         self.position_table = self._new_record_table(10)
-        self.position_history_table = self._new_record_table(10)
+        self.position_history_table = self._new_record_table(12)
         self.open_orders_table = self._new_record_table(10)
-        self.order_history_table = self._new_record_table(10)
+        self.order_history_table = self._new_record_table(12)
         self.records_tabs.addTab(self.position_table, "")
-        self.records_tabs.addTab(self.position_history_table, "")
+
+        position_history_page = QWidget()
+        position_history_layout = QVBoxLayout(position_history_page)
+        position_history_layout.setContentsMargins(0, 0, 0, 0)
+        position_history_toolbar = QHBoxLayout()
+        position_history_toolbar.addStretch(1)
+        self.btn_export_position_history = QPushButton()
+        self._reg(
+            self.btn_export_position_history.setText,
+            "export_position_history_csv")
+        self.btn_export_position_history.clicked.connect(
+            self._export_position_history)
+        position_history_toolbar.addWidget(self.btn_export_position_history)
+        position_history_layout.addLayout(position_history_toolbar)
+        position_history_layout.addWidget(self.position_history_table)
+        self.records_tabs.addTab(position_history_page, "")
 
         open_orders_page = QWidget()
         open_layout = QVBoxLayout(open_orders_page)
@@ -314,8 +330,8 @@ class RealtimeStrategyTab(BacktestTab):
         self.position_history_table.setHorizontalHeaderLabels([
             tr("live_symbol"), tr("live_side"), tr("col_entry_price"),
             tr("col_exit_price"), tr("col_qty"), tr("col_pnl"),
-            tr("col_fee"), tr("col_net_pnl"), tr("col_position_mode"),
-            tr("col_time"),
+            tr("col_fee"), tr("col_fee_asset"), tr("col_fee_value"),
+            tr("col_net_pnl"), tr("col_position_mode"), tr("col_time"),
         ])
         self.open_orders_table.setHorizontalHeaderLabels([
             tr("col_order_id"), tr("live_symbol"), tr("live_side"),
@@ -326,8 +342,8 @@ class RealtimeStrategyTab(BacktestTab):
         self.order_history_table.setHorizontalHeaderLabels([
             tr("live_symbol"), tr("live_side"), tr("col_type"),
             tr("col_order_price"), tr("col_avg_price"), tr("col_qty"),
-            tr("col_filled_qty"), tr("col_fee"), tr("col_order_status"),
-            tr("col_time"),
+            tr("col_filled_qty"), tr("col_fee"), tr("col_fee_asset"),
+            tr("col_fee_value"), tr("col_order_status"), tr("col_time"),
         ])
         self._refresh_record_tables()
         self._refresh_log_view()
@@ -1322,10 +1338,14 @@ class RealtimeStrategyTab(BacktestTab):
             "symbol", "side", lambda r: n(r["entry_price"], 2),
             lambda r: n(r["close_price"], 2), lambda r: n(r["quantity"]),
             lambda r: n(r["realized_pnl"]), lambda r: n(r["commission"]),
+            lambda r: r["commission_asset"] or "—",
+            lambda r: n(r["commission_value"])
+            if r["commission_value"] is not None else "—",
             lambda r: n(float(r["realized_pnl"] or 0)
-                        - float(r["commission"] or 0)),
+                        - float(r["commission_value"] or 0))
+            if r["commission_value"] is not None else "—",
             "position_mode", lambda r: local_time(r["updated_at"]),
-        ], pnl_columns=(5, 7))
+        ], pnl_columns=(5, 9))
         self._fill_table(self.open_orders_table, self._db.current_orders(), [
             "order_id", "symbol", "trade_direction", "action_type", "order_type",
             lambda r: n(r["price"], 2), lambda r: n(r["quantity"]),
@@ -1341,8 +1361,63 @@ class RealtimeStrategyTab(BacktestTab):
             "symbol", "side", "order_type", lambda r: n(r["price"], 2),
             lambda r: n(r["avg_price"], 2), lambda r: n(r["quantity"]),
             lambda r: n(r["filled_qty"]), lambda r: n(r["commission"]),
+            lambda r: r["commission_asset"] or "—",
+            lambda r: n(r["commission_value"])
+            if r["commission_value"] is not None else "—",
             "status", lambda r: local_time(r["updated_at"]),
         ])
+
+    def _export_position_history(self):
+        """将数据库中的全部持仓历史导出为带 BOM 的 UTF-8 CSV。"""
+        rows = self._db.all_position_history()
+        if not rows:
+            QMessageBox.information(
+                self, tr("app_title"), tr("position_history_empty"))
+            return
+
+        default_name = datetime.now().strftime(
+            "position_history_%Y%m%d_%H%M%S.csv")
+        path, _ = QFileDialog.getSaveFileName(
+            self, tr("export_position_history_csv"), default_name,
+            "CSV (*.csv)")
+        if not path:
+            return
+        if not path.lower().endswith(".csv"):
+            path += ".csv"
+
+        headers = [
+            tr("live_symbol"), tr("live_side"), tr("col_entry_price"),
+            tr("col_exit_price"), tr("col_qty"), tr("col_pnl"),
+            tr("col_fee"), tr("col_fee_asset"), tr("col_fee_value"),
+            tr("col_net_pnl"), tr("col_position_mode"), tr("col_time"),
+        ]
+        try:
+            with open(path, "w", newline="", encoding="utf-8-sig") as file:
+                writer = csv.writer(file)
+                writer.writerow(headers)
+                for row in rows:
+                    fee_value = row["commission_value"]
+                    net_pnl = float(row["realized_pnl"] or 0) \
+                        - float(fee_value or 0) \
+                        if fee_value is not None else ""
+                    writer.writerow([
+                        row["symbol"], row["side"], row["entry_price"],
+                        row["close_price"], row["quantity"],
+                        row["realized_pnl"], row["commission"],
+                        row["commission_asset"] or "", fee_value
+                        if fee_value is not None else "", net_pnl,
+                        row["position_mode"],
+                        self._format_local_time(row["updated_at"]),
+                    ])
+        except (OSError, csv.Error) as exc:
+            QMessageBox.warning(
+                self, tr("app_title"),
+                tr("position_history_export_failed", err=exc))
+            return
+        QMessageBox.information(
+            self, tr("app_title"),
+            tr("position_history_exported", count=len(rows), path=path))
+
     def _cancel_selected_order(self):
         row = self.open_orders_table.currentRow()
         if row < 0:

@@ -68,6 +68,7 @@ CREATE TABLE IF NOT EXISTS orders (
     realized_pnl REAL,
     commission REAL,
     commission_asset TEXT,
+    commission_value REAL,
     trade_details_sync_attempts INTEGER NOT NULL DEFAULT 0,
     trade_details_sync_next_retry_at TEXT,
     trade_details_sync_last_error TEXT,
@@ -115,6 +116,7 @@ CREATE TABLE IF NOT EXISTS positions_history (
     realized_pnl REAL NOT NULL DEFAULT 0.0,
     commission REAL NOT NULL DEFAULT 0.0,
     commission_asset TEXT,
+    commission_value REAL,
     position_id INTEGER,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -174,6 +176,23 @@ def _float(value, default: float = 0.0) -> float:
         return default
 
 
+def _commission_value(order: dict) -> float | None:
+    """Return fee value in the symbol quote asset, never a native-asset qty."""
+    explicit = order.get("commissionValue", order.get("fee_value"))
+    if explicit not in (None, ""):
+        return _float(explicit)
+    commission = _float(order.get(
+        "n", order.get("commission", order.get("fee", 0))))
+    if commission == 0:
+        return 0.0
+    asset = str(order.get(
+        "N", order.get("commissionAsset", order.get("fee_asset", "")))
+        or "").upper()
+    symbol = str(order.get("s", order.get("symbol", "")) or "").upper()
+    # Quote-asset commissions already have the correct PnL denomination.
+    return commission if asset and symbol.endswith(asset) else None
+
+
 class TradingDatabase:
     def __init__(self, path: Optional[str] = None):
         self.path = path or os.path.join(APP_DIR, "data", "nexus_strategy.sqlite3")
@@ -190,6 +209,22 @@ class TradingDatabase:
     def initialize(self):
         with self._connect() as connection:
             connection.executescript(SCHEMA)
+            # Lightweight forward migration for databases created by older builds.
+            for table in ("orders", "positions_history"):
+                columns = {
+                    row[1] for row in connection.execute(
+                        f"PRAGMA table_info({table})").fetchall()
+                }
+                if "commission_value" not in columns:
+                    connection.execute(
+                        f"ALTER TABLE {table} ADD COLUMN commission_value REAL")
+            for table in ("orders", "positions_history"):
+                connection.execute(
+                    f"UPDATE {table} SET commission_value=commission "
+                    "WHERE commission_value IS NULL AND (commission=0 OR "
+                    "(commission_asset IS NOT NULL AND "
+                    "UPPER(symbol) LIKE '%' || UPPER(commission_asset)))"
+                )
 
     @staticmethod
     def _order_values(order: dict) -> dict:
@@ -240,6 +275,7 @@ class TradingDatabase:
             "commission": _float(order.get(
                 "n", order.get("commission", order.get("fee", 0)))),
             "commission_asset": order.get("N", order.get("commissionAsset")),
+            "commission_value": _commission_value(order),
             "trade_direction": direction,
             "position_mode": "HEDGE" if position_side in ("LONG", "SHORT") else "ONE_WAY",
             "reduce_only": int(reduce_only),
@@ -423,8 +459,9 @@ class TradingDatabase:
                     connection.execute(
                         "INSERT INTO positions_history (symbol, side, position_mode, "
                         "entry_price, close_price, tp_price, sl_price, close_order_id, "
-                        "quantity, realized_pnl, commission, commission_asset, position_id, "
-                        "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        "quantity, realized_pnl, commission, commission_asset, "
+                        "commission_value, position_id, created_at, updated_at) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (
                             row["symbol"], row["position_side"], row["position_mode"],
                             row["avg_entry_price"] or 0,
@@ -435,6 +472,7 @@ class TradingDatabase:
                             close_order["realized_pnl"] if close_order else row["realized_pnl"],
                             close_order["commission"] if close_order else 0,
                             close_order["commission_asset"] if close_order else None,
+                            close_order["commission_value"] if close_order else 0,
                             row["id"], row["updated_at"], now,
                         ),
                     )
@@ -491,14 +529,26 @@ class TradingDatabase:
                     "entry_value": 0.0, "exit_qty": 0.0,
                     "exit_value": 0.0, "realized_pnl": 0.0,
                     "commission": 0.0, "commission_asset": None,
+                    "commission_value": 0.0, "commission_value_complete": True,
+                    "commission_assets": set(),
                     "created_at": _event_time(trade.get("time")),
                     "close_order_id": None,
                 }
                 states[key] = state
 
             state["commission"] += _float(trade.get("commission"))
-            state["commission_asset"] = trade.get("commissionAsset") \
-                or state["commission_asset"]
+            commission_asset = trade.get("commissionAsset")
+            if commission_asset:
+                state["commission_assets"].add(str(commission_asset).upper())
+            fee_value = _commission_value(trade)
+            if fee_value is None:
+                state["commission_value_complete"] = False
+            else:
+                state["commission_value"] += fee_value
+            state["commission_asset"] = (
+                next(iter(state["commission_assets"]))
+                if len(state["commission_assets"]) == 1
+                else ("MIXED" if state["commission_assets"] else None))
             state["realized_pnl"] += _float(trade.get("realizedPnl"))
             if is_open:
                 state["remaining"] += quantity
@@ -529,13 +579,16 @@ class TradingDatabase:
                     cycle["direction"], cycle["position_mode"], entry_price,
                     close_price, cycle["entry_qty"], cycle["realized_pnl"],
                     cycle["commission"], cycle["commission_asset"],
+                    cycle["commission_value"]
+                    if cycle["commission_value_complete"] else None,
                     cycle["created_at"], cycle["updated_at"],
                 )
                 if existing:
                     connection.execute(
                         "UPDATE positions_history SET side=?, position_mode=?, "
                         "entry_price=?, close_price=?, quantity=?, realized_pnl=?, "
-                        "commission=?, commission_asset=?, created_at=?, updated_at=? "
+                        "commission=?, commission_asset=?, commission_value=?, "
+                        "created_at=?, updated_at=? "
                         "WHERE id=?",
                         values + (existing["id"],),
                     )
@@ -543,12 +596,14 @@ class TradingDatabase:
                     connection.execute(
                         "INSERT INTO positions_history (symbol, side, position_mode, "
                         "entry_price, close_price, close_order_id, quantity, "
-                        "realized_pnl, commission, commission_asset, created_at, updated_at) "
-                        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        "realized_pnl, commission, commission_asset, commission_value, "
+                        "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (cycle["symbol"], cycle["direction"], cycle["position_mode"],
                          entry_price, close_price, cycle["close_order_id"],
                          cycle["entry_qty"], cycle["realized_pnl"],
                          cycle["commission"], cycle["commission_asset"],
+                         cycle["commission_value"]
+                         if cycle["commission_value_complete"] else None,
                          cycle["created_at"], cycle["updated_at"]),
                     )
         return len(completed)
@@ -571,18 +626,26 @@ class TradingDatabase:
                 realized_pnl = sum(_float(fill.get("realizedPnl")) for fill in fills)
                 commission = sum(
                     _float(fill.get("commission")) for fill in fills)
-                commission_asset = next((
-                    fill.get("commissionAsset") for fill in reversed(fills)
-                    if fill.get("commissionAsset")), None)
+                fee_values = [_commission_value(fill) for fill in fills]
+                commission_value = sum(fee_values) \
+                    if all(value is not None for value in fee_values) else None
+                commission_assets = {
+                    str(fill.get("commissionAsset")).upper()
+                    for fill in fills if fill.get("commissionAsset")
+                }
+                commission_asset = next(iter(commission_assets)) \
+                    if len(commission_assets) == 1 \
+                    else ("MIXED" if commission_assets else None)
                 updated_at = _event_time(max(
                     (_float(fill.get("time")) for fill in fills), default=0))
                 connection.execute(
                     "UPDATE orders SET filled_quantity=?, filled_qty=?, "
                     "filled_price=?, avg_price=?, realized_pnl=?, commission=?, "
-                    "commission_asset=?, updated_at=? "
+                    "commission_asset=?, commission_value=?, updated_at=? "
                     "WHERE exchange='binance' AND symbol=? AND order_id=?",
                     (quantity, quantity, avg_price, avg_price, realized_pnl,
-                     commission, commission_asset, updated_at, symbol, order_id),
+                     commission, commission_asset, commission_value, updated_at,
+                     symbol, order_id),
                 )
                 linked = connection.execute(
                     "SELECT trade_id FROM order_trade_links WHERE order_id=?",
@@ -620,9 +683,10 @@ class TradingDatabase:
         resolved = 0
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT id, close_order_id, realized_pnl, commission "
+                "SELECT id, close_order_id, realized_pnl, commission_value "
                 "FROM positions_history "
-                f"WHERE close_order_id IN ({placeholders})", ids,
+                f"WHERE close_order_id IN ({placeholders}) "
+                "AND commission_value IS NOT NULL", ids,
             ).fetchall()
             for row in rows:
                 resolved += 1
@@ -632,12 +696,12 @@ class TradingDatabase:
                     "VALUES (?, ?, ?, ?)",
                     (row["close_order_id"], row["id"],
                      float(row["realized_pnl"] or 0)
-                     - float(row["commission"] or 0),
+                     - float(row["commission_value"] or 0),
                      _utc_now()),
                 )
                 if cursor.rowcount:
                     total += float(row["realized_pnl"] or 0) \
-                        - float(row["commission"] or 0)
+                        - float(row["commission_value"] or 0)
         return total, resolved
 
     def claim_unapplied_session_pnl(
@@ -715,6 +779,11 @@ class TradingDatabase:
         return self.rows(
             "SELECT * FROM positions_history ORDER BY updated_at DESC LIMIT ?",
             (max(int(limit), 1),))
+
+    def all_position_history(self) -> list[dict]:
+        """返回全部持仓历史，供 CSV 导出等非分页场景使用。"""
+        return self.rows(
+            "SELECT * FROM positions_history ORDER BY updated_at DESC")
 
     def current_orders(self) -> list[dict]:
         return self.rows(
