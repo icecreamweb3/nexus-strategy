@@ -244,7 +244,7 @@ def test_zero_pnl_protection_exit_still_marks_exit_kline():
         _gateway=SimpleNamespace(client=client),
         _entry_kline_index=4,
         _update_strategy_capital_label=lambda: None,
-        _refresh_balances=lambda **_kwargs: refreshed.append(True),
+        _refresh_balances=lambda **_kwargs: refreshed.append(True) or True,
         _persist_live_session=lambda: None,
         _record_log=lambda *_args: None,
         _sync_user_trades=lambda *_args, **_kwargs: None,
@@ -261,7 +261,7 @@ def test_zero_pnl_protection_exit_still_marks_exit_kline():
     assert refreshed == [True]
 
 
-def test_strategy_capital_uses_claimed_position_history_pnl():
+def test_closed_position_uses_refreshed_account_total_without_adding_pnl():
     refreshed = []
     client = SimpleNamespace(
         has_open_position=lambda _symbol: False,
@@ -276,20 +276,62 @@ def test_strategy_capital_uses_claimed_position_history_pnl():
         _gateway=SimpleNamespace(client=client),
         _entry_kline_index=4,
         _update_strategy_capital_label=lambda: None,
-        _refresh_balances=lambda **_kwargs: refreshed.append(True),
+        _refresh_balances=None,
         _persist_live_session=lambda: None,
         _record_log=lambda *_args: None,
         _sync_user_trades=lambda *_args, **_kwargs: None,
         _db=SimpleNamespace(
             claim_position_realized_pnl=lambda _ids: (12.5, 1)),
     )
+    def refresh_balances(**_kwargs):
+        refreshed.append(True)
+        tab._strategy_capital = 250.0
+        return True
+    tab._refresh_balances = refresh_balances
 
     RealtimeStrategyTab._reconcile_strategy_capital(tab, "BTCUSDT")
 
-    assert tab._strategy_capital == 112.5
+    assert tab._strategy_capital == 250.0
     assert tab._pending_realized_pnl == 0
     assert tab._pending_close_order_ids == set()
     assert refreshed == [True]
+
+
+def test_balance_is_futures_and_strategy_balance_is_spot_plus_futures():
+    class ValueWidget:
+        def __init__(self, value=0):
+            self.current = value
+
+        def setText(self, value):
+            self.current = value
+
+        def value(self):
+            return self.current
+
+        def setValue(self, value):
+            self.current = value
+
+    tab = SimpleNamespace(
+        _strategy_capital=None,
+        _strategy_capital_from_account=False,
+        lbl_balance_value=ValueWidget(),
+        lbl_strategy_capital_value=ValueWidget(),
+        sp_total_capital=ValueWidget(),
+        _spot_balance=lambda _account, _symbol: ("USDT", 20.0),
+        _wallet_balance=lambda _account, _symbol: ("USDT", 80.0),
+    )
+    tab._update_strategy_capital_label = lambda: (
+        RealtimeStrategyTab._update_strategy_capital_label(tab))
+    client = SimpleNamespace(
+        get_spot_account_info=lambda: {"balances": []})
+
+    asset, futures_balance = RealtimeStrategyTab._refresh_balance_labels(
+        tab, client, {"assets": []}, "BTCUSDT")
+
+    assert (asset, futures_balance) == ("USDT", 80.0)
+    assert tab.lbl_balance_value.current == "80.00 USDT"
+    assert tab.lbl_strategy_capital_value.current == "100.00"
+    assert tab._strategy_capital == 100.0
 
 
 def test_balance_timer_refreshes_even_when_strategy_is_stopped():
@@ -302,6 +344,27 @@ def test_balance_timer_refreshes_even_when_strategy_is_stopped():
     RealtimeStrategyTab._auto_refresh_account(tab)
 
     assert refreshed == [{"show_errors": False}]
+
+
+def test_running_balance_timer_does_not_trigger_full_account_sync():
+    calls = []
+    tab = SimpleNamespace(
+        _running=True,
+        _refresh_balances=lambda **kwargs: calls.append(
+            ("balances", kwargs)),
+        _refresh_account=lambda **kwargs: calls.append(("account", kwargs)),
+        _reconcile_strategy_capital=lambda symbol: calls.append(
+            ("reconcile", symbol)),
+        cmb_symbol=SimpleNamespace(
+            currentText=lambda: "BTCUSDT"),
+    )
+
+    RealtimeStrategyTab._auto_refresh_account(tab)
+
+    assert calls == [
+        ("balances", {"show_errors": False}),
+        ("reconcile", "BTCUSDT"),
+    ]
 
 
 def test_algo_order_is_normalized_for_the_shared_order_table():

@@ -43,6 +43,7 @@ class RealtimeStrategyTab(BacktestTab):
         self._running = False
         self._placing_order = False
         self._strategy_capital = None
+        self._strategy_capital_from_account = False
         self._pending_realized_pnl = 0.0
         self._processed_trade_ids = set()
         self._pending_close_order_ids = set()
@@ -148,7 +149,7 @@ class RealtimeStrategyTab(BacktestTab):
 
     def _on_total_capital_changed(self, value: float) -> None:
         """停止状态下，总资金参数就是下一次交易使用的策略账户余额。"""
-        if self._running:
+        if self._running or self._strategy_capital_from_account:
             return
         self._strategy_capital = float(value)
         self._update_strategy_capital_label()
@@ -195,10 +196,10 @@ class RealtimeStrategyTab(BacktestTab):
         self.cmb_interval.setMinimumWidth(70)
         self.lbl_latest_value = QLabel(f"{configured} PERP  —")
         self.lbl_latest_value.setStyleSheet("color: #00a99d; font-weight: bold;")
-        self.lbl_spot_balance_value = QLabel("—")
-        self.lbl_spot_balance_value.setStyleSheet("color: #00a99d;")
-        self.lbl_futures_balance_value = QLabel("—")
-        self.lbl_futures_balance_value.setStyleSheet("color: #00a99d;")
+        self.lbl_balance_value = QLabel("—")
+        self.lbl_balance_value.setStyleSheet("color: #00a99d;")
+        self.lbl_strategy_capital_value = QLabel("—")
+        self.lbl_strategy_capital_value.setStyleSheet("color: #00a99d;")
         self.lbl_risk_value = QLabel("—")
         self.lbl_risk_value.setStyleSheet("color: #00a99d;")
         self.btn_refresh_account = QPushButton()
@@ -213,10 +214,10 @@ class RealtimeStrategyTab(BacktestTab):
         grid.addWidget(self.cmb_interval, 0, 1)
         grid.addWidget(self.lbl_latest_value, 0, 2)
         grid.setColumnStretch(3, 1)
-        grid.addWidget(self._label("live_spot_balance"), 0, 4)
-        grid.addWidget(self.lbl_spot_balance_value, 0, 5)
-        grid.addWidget(self._label("live_futures_balance"), 0, 6)
-        grid.addWidget(self.lbl_futures_balance_value, 0, 7)
+        grid.addWidget(self._label("live_balance_short"), 0, 4)
+        grid.addWidget(self.lbl_balance_value, 0, 5)
+        grid.addWidget(self._label("live_strategy_capital"), 0, 6)
+        grid.addWidget(self.lbl_strategy_capital_value, 0, 7)
         grid.addWidget(self._label("live_risk_rate"), 0, 8)
         grid.addWidget(self.lbl_risk_value, 0, 9)
         grid.addWidget(self.btn_refresh_account, 0, 10)
@@ -402,9 +403,10 @@ class RealtimeStrategyTab(BacktestTab):
             self._kline_stream = stream
             self.klines = processor.klines
             self._running = True
-            self._strategy_capital = float(
-                resume_session["strategy_capital"]
-                if resume_session else order.total_capital)
+            if not self._strategy_capital_from_account:
+                self._strategy_capital = float(
+                    resume_session["strategy_capital"]
+                    if resume_session else order.total_capital)
             self._session_started_at = (
                 resume_session["started_at"] if resume_session
                 else datetime.now(timezone.utc).isoformat(timespec="seconds"))
@@ -431,10 +433,11 @@ class RealtimeStrategyTab(BacktestTab):
             if has_position and not positions:
                 raise RuntimeError(f"{symbol} 当前持仓数据不完整")
             if resume_session:
-                pnl, claimed = self._db.claim_unapplied_session_pnl(
+                _pnl, claimed = self._db.claim_unapplied_session_pnl(
                     symbol, self._session_started_at)
                 if claimed:
-                    self._strategy_capital += pnl
+                    # _refresh_account 已直接从现货 + 合约余额恢复策略资金；
+                    # 这里只登记历史事件，不能再次累加净盈亏。
                     self._update_strategy_capital_label()
                 if positions:
                     if self._entry_time_ms is None:
@@ -904,7 +907,10 @@ class RealtimeStrategyTab(BacktestTab):
                 client = gateway.client
             account = client.get_account_info()
             if not account:
-                raise RuntimeError("Binance 账户接口未返回数据")
+                detail = getattr(client, "last_futures_account_error", None)
+                raise RuntimeError(
+                    "Binance 合约账户接口未返回数据"
+                    + (f"：{detail}" if detail else ""))
             symbol = self.cmb_symbol.currentText().strip().upper()
             _margin_asset, balance = self._refresh_balance_labels(
                 client, account, symbol)
@@ -982,12 +988,10 @@ class RealtimeStrategyTab(BacktestTab):
             self.btn_sync_account.setEnabled(True)
 
     def _auto_refresh_account(self):
+        self._refresh_balances(show_errors=False)
         if self._running:
-            self._refresh_account(show_errors=False)
             symbol = self.cmb_symbol.currentText().strip().upper()
             self._reconcile_strategy_capital(symbol)
-        else:
-            self._refresh_balances(show_errors=False)
 
     @staticmethod
     def _account_risk_ratio(account: dict):
@@ -1048,17 +1052,22 @@ class RealtimeStrategyTab(BacktestTab):
 
     def _refresh_balance_labels(self, client, futures_account: dict,
                                 symbol: str) -> tuple[str, float]:
-        """更新现货和合约余额标签，并返回合约 Wallet Balance。"""
+        """Balance 显示合约余额，Strategy Balance 显示现货 + 合约。"""
         spot_account = client.get_spot_account_info()
         if not spot_account:
-            raise RuntimeError("Binance 现货账户接口未返回数据")
-        spot_asset, spot_balance = self._spot_balance(spot_account, symbol)
+            detail = getattr(client, "last_spot_account_error", None)
+            raise RuntimeError(
+                "Binance 现货账户接口未返回数据"
+                + (f"：{detail}" if detail else ""))
+        _spot_asset, spot_balance = self._spot_balance(spot_account, symbol)
         futures_asset, futures_balance = self._wallet_balance(
             futures_account, symbol)
-        self.lbl_spot_balance_value.setText(
-            f"{spot_balance:,.2f} {spot_asset}")
-        self.lbl_futures_balance_value.setText(
+        strategy_capital = spot_balance + futures_balance
+        self.lbl_balance_value.setText(
             f"{futures_balance:,.2f} {futures_asset}")
+        self._strategy_capital = strategy_capital
+        self._strategy_capital_from_account = True
+        self._update_strategy_capital_label()
         return futures_asset, futures_balance
 
     def _refresh_balances(self, show_errors: bool = False, client=None) -> bool:
@@ -1074,7 +1083,10 @@ class RealtimeStrategyTab(BacktestTab):
                 client = BinanceLiveGateway(config).client
             futures_account = client.get_account_info()
             if not futures_account:
-                raise RuntimeError("Binance 合约账户接口未返回数据")
+                detail = getattr(client, "last_futures_account_error", None)
+                raise RuntimeError(
+                    "Binance 合约账户接口未返回数据"
+                    + (f"：{detail}" if detail else ""))
             symbol = self.cmb_symbol.currentText().strip().upper()
             self._refresh_balance_labels(client, futures_account, symbol)
             return True
@@ -1087,6 +1099,9 @@ class RealtimeStrategyTab(BacktestTab):
 
     def _update_strategy_capital_label(self):
         value = self._strategy_capital
+        self.lbl_strategy_capital_value.setText(
+            f"{value:,.2f}" if self._strategy_capital_from_account
+            and value is not None else "—")
         if value is not None and self.sp_total_capital.value() != value:
             self.sp_total_capital.setValue(value)
 
@@ -1104,7 +1119,7 @@ class RealtimeStrategyTab(BacktestTab):
             values, newly_filled = self._db.upsert_order(order)
             if newly_filled:
                 balance = self._number_from_label(
-                    self.lbl_futures_balance_value.text())
+                    self.lbl_balance_value.text())
                 self._db.record_filled_trade(order, balance_after=balance)
             if self._is_close_trade_event(order, values):
                 if values.get("order_id"):
@@ -1192,8 +1207,9 @@ class RealtimeStrategyTab(BacktestTab):
         if has_position is not False:
             return
         # Binance 已确认空仓后立即刷新，不等待下一个 15 秒定时周期。
-        self._refresh_balances(
-            show_errors=False, client=self._gateway.client)
+        if not self._refresh_balances(
+                show_errors=False, client=self._gateway.client):
+            return
         try:
             self._sync_user_trades(symbol, refresh=False)
         except Exception as exc:  # noqa: BLE001
@@ -1204,7 +1220,6 @@ class RealtimeStrategyTab(BacktestTab):
         if claimed == 0:
             return
         self._pending_close_order_ids.clear()
-        self._strategy_capital += pnl
         self._pending_realized_pnl = 0.0
         self._entry_kline_index = None
         self._entry_time_ms = None

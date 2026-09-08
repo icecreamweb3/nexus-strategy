@@ -216,6 +216,8 @@ class BinanceClient:
         }
         # OrdersMonitor uses this to surface the real listen-key failure in the UI.
         self.last_user_data_stream_error = None
+        self.last_futures_account_error = None
+        self.last_spot_account_error = None
         
         # 初始化的时候设置时间戳偏移
         self.last_time_sync = 0  # 记录上次同步时间
@@ -854,22 +856,54 @@ class BinanceClient:
             logger.debug(f"Failed to get server time: {e}")
             return None
     
+    def _request_account_snapshot(self, *, spot: bool) -> dict:
+        """读取账户快照；瞬时网络/时间戳错误会短暂重试并保留原始错误。"""
+        error_attr = "last_spot_account_error" if spot \
+            else "last_futures_account_error"
+        setattr(self, error_attr, None)
+        attempts = max(int(getattr(self, "MAX_RETRIES", 2)), 0) + 1
+        recv_window = int(getattr(self, "DEFAULT_RECV_WINDOW", 60_000))
+        last_error = None
+
+        for attempt in range(attempts):
+            try:
+                if hasattr(self, "last_time_sync"):
+                    self.set_timestamp_offset()
+                request = self.client.get_account if spot \
+                    else self.client.futures_account
+                try:
+                    result = request(recvWindow=recv_window)
+                except TypeError:
+                    # 兼容旧 SDK 和测试替身不接受 recvWindow 的情况。
+                    result = request()
+                if result:
+                    return result
+                last_error = RuntimeError("Binance 返回空账户响应")
+            except Exception as exc:
+                last_error = exc
+                if self._is_timestamp_error_exception(exc) \
+                        and hasattr(self, "last_time_sync"):
+                    self.set_timestamp_offset(force=True)
+
+            if attempt < attempts - 1:
+                time.sleep(0.2 * (attempt + 1))
+
+        detail = f"{type(last_error).__name__}: {last_error}" \
+            if last_error is not None else "未知错误"
+        setattr(self, error_attr, detail)
+        get_logger().warning(
+            "Binance %s账户请求失败（已尝试 %d 次）: %s",
+            "现货" if spot else "合约", attempts, detail,
+        )
+        return {}
+
     def get_account_info(self) -> dict:
-        """Get account information (supports sub-account if configured)"""
-        try:
-            data = self.client.futures_account()
-            return data
-        except Exception as e:
-            logger.debug(f"Failed to get account info: {e}")
-            return {}
+        """Get futures account information (supports sub-account if configured)."""
+        return self._request_account_snapshot(spot=False)
 
     def get_spot_account_info(self) -> dict:
         """Return the Binance spot account snapshot."""
-        try:
-            return self.client.get_account() or {}
-        except Exception as e:
-            logger.debug(f"Failed to get spot account info: {e}")
-            return {}
+        return self._request_account_snapshot(spot=True)
 
     def get_account_balance(self, asset: str = "USDT") -> float:
         """Return wallet balance for *asset* in the futures wallet."""

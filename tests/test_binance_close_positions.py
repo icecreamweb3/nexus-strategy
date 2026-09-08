@@ -78,6 +78,47 @@ def test_spot_account_info_uses_spot_account_endpoint():
     assert client.get_spot_account_info()["balances"][0]["free"] == "12"
 
 
+def test_futures_account_snapshot_retries_transient_failure(monkeypatch):
+    calls = []
+
+    class RawClient:
+        @staticmethod
+        def futures_account(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                raise ConnectionError("proxy temporarily unavailable")
+            return {"assets": [{"asset": "USDT", "walletBalance": "88"}]}
+
+    client = object.__new__(BinanceClient)
+    client.client = RawClient()
+    client.MAX_RETRIES = 1
+    client.DEFAULT_RECV_WINDOW = 60_000
+    monkeypatch.setattr("app.client.binance_client.time.sleep", lambda _delay: None)
+
+    result = client.get_account_info()
+
+    assert result["assets"][0]["walletBalance"] == "88"
+    assert calls == [{"recvWindow": 60_000}, {"recvWindow": 60_000}]
+    assert client.last_futures_account_error is None
+
+
+def test_futures_account_snapshot_preserves_original_error(monkeypatch):
+    class RawClient:
+        @staticmethod
+        def futures_account(**_kwargs):
+            raise TimeoutError("proxy unavailable")
+
+    client = object.__new__(BinanceClient)
+    client.client = RawClient()
+    client.MAX_RETRIES = 1
+    client.DEFAULT_RECV_WINDOW = 60_000
+    monkeypatch.setattr("app.client.binance_client.time.sleep", lambda _delay: None)
+
+    assert client.get_account_info() == {}
+    assert client.last_futures_account_error == \
+        "TimeoutError: proxy unavailable"
+
+
 def test_filled_trade_log_contains_fee_fields_but_not_credentials(monkeypatch):
     messages = []
 
