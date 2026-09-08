@@ -120,17 +120,24 @@ def test_futures_account_snapshot_preserves_original_error(monkeypatch):
 
 
 def test_filled_trade_log_contains_fee_fields_but_not_credentials(monkeypatch):
-    messages = []
+    summaries = []
+    details = []
 
     class FakeLogger:
+        def __init__(self, messages):
+            self.messages = messages
+
         def info(self, message, *args):
-            messages.append(message % args)
+            self.messages.append(message % args)
 
         def debug(self, message, *args):
-            messages.append(message % args)
+            self.messages.append(message % args)
 
     monkeypatch.setattr(
-        "app.client.binance_client.get_logger", lambda: FakeLogger())
+        "app.client.binance_client.get_logger", lambda: FakeLogger(summaries))
+    monkeypatch.setattr(
+        "app.client.binance_client.get_trade_detail_logger",
+        lambda: FakeLogger(details))
 
     _log_filled_trade_response("get_user_trades", {
         "symbol": "BTCUSDT", "limit": 20,
@@ -141,11 +148,33 @@ def test_filled_trade_log_contains_fee_fields_but_not_credentials(monkeypatch):
         "commissionAsset": "USDT", "realizedPnl": "1.2",
     }])
 
-    output = "\n".join(messages)
+    assert len(summaries) == 1
+    assert "count=1" in summaries[0]
+    output = "\n".join(details)
     assert "commission': '0.144'" in output
     assert "commissionAsset': 'USDT'" in output
     assert "signature" not in output
     assert "secret" not in output
+
+
+def test_filled_trade_detail_log_can_be_disabled(monkeypatch):
+    summaries = []
+
+    class FakeSystemLogger:
+        def info(self, message, *args):
+            summaries.append(message % args)
+
+    monkeypatch.setattr(
+        "app.client.binance_client.get_logger", lambda: FakeSystemLogger())
+    monkeypatch.setattr(
+        "app.client.binance_client.get_trade_detail_logger", lambda: None)
+
+    _log_filled_trade_response("get_user_trades", {"symbol": "BTCUSDT"}, [{
+        "id": 1, "orderId": 2, "symbol": "BTCUSDT",
+    }])
+
+    assert len(summaries) == 1
+    assert "count=1" in summaries[0]
 
 
 def test_bnb_fee_is_valued_in_symbol_quote_asset_at_fill_minute():

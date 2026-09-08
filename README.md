@@ -51,10 +51,11 @@ Windows EXE 需要在 Windows 上构建。程序启动后会在 EXE 所在目录
 | `BINANCE_TESTNET` | `true` 使用合约测试网，建议先在测试网验证 |
 | `BINANCE_SYMBOL` | 默认 ticker，例如 `BTCUSDT` |
 | `UI_LANGUAGE` | 默认界面语言：`zh_CN` 或 `en_US`（简写 `zh` / `en` 亦可），缺省为 `zh_CN` |
+| `TRADE_DETAIL_LOG_ENABLED` | 是否记录 Binance 逐笔成交明细；`true` 开启，缺省为 `false` |
 
 ## 日志
 
-应用日志写入 `logs/trade.log`（RotatingFileHandler，单文件 5MB × 5 份）。每次点击 Start Trading 会另外生成 `logs/trader_live_时间戳.log`，记录该次实盘会话的策略检测和下单日志。
+应用日志写入 `logs/trade.log`（RotatingFileHandler，单文件 5MB × 5 份）。逐笔成交明细默认关闭；在 `.env` 中设置 `TRADE_DETAIL_LOG_ENABLED=true` 并重启软件后，明细会写入独立轮转文件 `logs/trade_details.log`（单文件 5MB × 5 份），而查询汇总仍写入 `trade.log`。每次点击 Start Trading 会另外生成 `logs/trader_live_时间戳.log`，记录该次实盘会话的策略检测和下单日志。
 
 订单、成交和持仓数据写入 `data/nexus_strategy.sqlite3`，首次启动时自动创建表和索引。
 完整 SQLite DDL 位于 `docs/trading_schema.sql`。

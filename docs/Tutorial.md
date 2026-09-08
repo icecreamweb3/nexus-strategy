@@ -18,7 +18,7 @@ python scripts/gen_sample_data.py
 python main.py
 ```
 
-启动后进入策略回测页，菜单栏「语言 / Language」可在运行时切换中英文。默认界面语言可在 `.env` 中通过 `UI_LANGUAGE` 配置（`zh_CN` 或 `en_US`，简写 `zh` / `en` 亦可，缺省为中文）。
+启动后进入策略回测页，菜单栏「语言 / Language」可在运行时切换中英文。默认界面语言可在 `.env` 中通过 `UI_LANGUAGE` 配置（`zh_CN` 或 `en_US`，简写 `zh` / `en` 亦可，缺省为中文）。如需保存 Binance 逐笔成交明细，可设置 `TRADE_DETAIL_LOG_ENABLED=true`；明细将写入 `logs/trade_details.log`，默认关闭。
 
 ### 1.1 打包 Windows 可执行文件
 

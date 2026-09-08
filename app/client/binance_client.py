@@ -36,7 +36,7 @@ import logging
 from dotenv import load_dotenv
 
 from app.config import APP_DIR
-from app.logger import get_logger
+from app.logger import get_logger, get_trade_detail_logger
 
 
 def load_runtime_env(override: bool = True) -> None:
@@ -61,21 +61,24 @@ _TRADE_LOG_FIELDS = (
 def _log_filled_trade_response(source: str, params: dict,
                                trades: List[dict]) -> None:
     """记录已成交响应中的排查字段，不输出鉴权或签名信息。"""
-    trade_logger = get_logger()
+    system_logger = get_logger()
     safe_params = {
         key: value for key, value in params.items()
         if key in ("symbol", "orderId", "startTime", "endTime", "limit")
     }
-    trade_logger.info(
+    system_logger.info(
         "Binance 已成交记录响应: source=%s params=%s count=%d",
         source, safe_params, len(trades),
     )
+    trade_detail_logger = get_trade_detail_logger()
+    if trade_detail_logger is None:
+        return
     for index, trade in enumerate(trades, start=1):
         details = {
             field: trade.get(field) for field in _TRADE_LOG_FIELDS
             if field in trade
         }
-        trade_logger.debug(
+        trade_detail_logger.debug(
             "Binance 已成交记录明细: source=%s row=%d/%d data=%s",
             source, index, len(trades), details,
         )

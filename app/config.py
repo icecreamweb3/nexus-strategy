@@ -33,6 +33,7 @@ class Config:
     testnet: bool
     symbol: str
     language: str
+    trade_detail_log_enabled: bool
 
     @property
     def has_credentials(self) -> bool:
@@ -52,4 +53,7 @@ def load_config() -> Config:
         testnet=os.getenv("BINANCE_TESTNET", "true").lower() in ("1", "true", "yes"),
         symbol=os.getenv("BINANCE_SYMBOL", "BTCUSDT"),
         language=_LANG_ALIASES.get(lang, "zh_CN"),
+        trade_detail_log_enabled=os.getenv(
+            "TRADE_DETAIL_LOG_ENABLED", "false"
+        ).strip().lower() in ("1", "true", "yes", "on"),
     )
