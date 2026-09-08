@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import app.ui.realtime_tab as realtime_tab_module
 from app.ui.realtime_tab import RealtimeStrategyTab
 
 
@@ -138,6 +139,64 @@ def test_existing_position_skips_initial_signal_after_preload():
     RealtimeStrategyTab._evaluate_initial_signal_when_flat(tab, True)
 
     assert evaluated == []
+
+
+class _ComboStub:
+    def __init__(self):
+        self.value = ""
+
+    def setCurrentText(self, value):
+        self.value = value
+
+
+def _resume_tab(session):
+    calls = []
+    database = SimpleNamespace(
+        load_live_session=lambda: session,
+        deactivate_live_session=lambda: calls.append("deactivate"),
+    )
+    tab = SimpleNamespace(
+        _running=False,
+        _db=database,
+        cmb_symbol=_ComboStub(),
+        cmb_interval=_ComboStub(),
+        _start_live=lambda value: calls.append(("start", value)),
+    )
+    return tab, calls
+
+
+def test_empty_position_waits_for_manual_start_on_app_launch(monkeypatch):
+    session = {"active": 1, "symbol": "BTCUSDT", "interval": "1h"}
+    tab, calls = _resume_tab(session)
+    client = SimpleNamespace(has_open_position=lambda _symbol: False)
+    monkeypatch.setattr(
+        realtime_tab_module, "load_config",
+        lambda: SimpleNamespace(has_credentials=True))
+    monkeypatch.setattr(
+        realtime_tab_module, "BinanceLiveGateway",
+        lambda _config: SimpleNamespace(client=client))
+
+    RealtimeStrategyTab._resume_live_session(tab)
+
+    assert calls == ["deactivate"]
+    assert tab.cmb_symbol.value == "BTCUSDT"
+    assert tab.cmb_interval.value == "1h"
+
+
+def test_existing_position_still_resumes_on_app_launch(monkeypatch):
+    session = {"active": 1, "symbol": "BTCUSDT", "interval": "1h"}
+    tab, calls = _resume_tab(session)
+    client = SimpleNamespace(has_open_position=lambda _symbol: True)
+    monkeypatch.setattr(
+        realtime_tab_module, "load_config",
+        lambda: SimpleNamespace(has_credentials=True))
+    monkeypatch.setattr(
+        realtime_tab_module, "BinanceLiveGateway",
+        lambda _config: SimpleNamespace(client=client))
+
+    RealtimeStrategyTab._resume_live_session(tab)
+
+    assert calls == [("start", session)]
 
 
 def test_startup_displays_active_session_strategy_capital():
@@ -314,6 +373,7 @@ def test_balance_is_futures_and_strategy_balance_is_spot_plus_futures():
     tab = SimpleNamespace(
         _strategy_capital=None,
         _strategy_capital_from_account=False,
+        _strategy_capital_asset=None,
         lbl_balance_value=ValueWidget(),
         lbl_strategy_capital_value=ValueWidget(),
         lbl_spot_bnb_value=ValueWidget(),
@@ -338,7 +398,7 @@ def test_balance_is_futures_and_strategy_balance_is_spot_plus_futures():
 
     assert (asset, futures_balance) == ("USDT", 80.0)
     assert tab.lbl_balance_value.current == "80.00 USDT"
-    assert tab.lbl_strategy_capital_value.current == "100.00"
+    assert tab.lbl_strategy_capital_value.current == "100.00 USDT"
     assert tab.lbl_spot_bnb_value.current == "1.3000 BNB"
     assert tab.lbl_futures_bnb_value.current == "2.5000 BNB"
     assert tab._strategy_capital == 100.0

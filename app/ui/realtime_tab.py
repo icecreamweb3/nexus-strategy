@@ -4,7 +4,7 @@ from __future__ import annotations
 import csv
 from datetime import datetime, timezone
 
-from PyQt5.QtCore import QTimer
+from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
     QComboBox, QFileDialog, QGridLayout, QGroupBox, QLabel, QMessageBox,
@@ -44,6 +44,7 @@ class RealtimeStrategyTab(BacktestTab):
         self._placing_order = False
         self._strategy_capital = None
         self._strategy_capital_from_account = False
+        self._strategy_capital_asset = None
         self._pending_realized_pnl = 0.0
         self._processed_trade_ids = set()
         self._pending_close_order_ids = set()
@@ -218,9 +219,18 @@ class RealtimeStrategyTab(BacktestTab):
         grid.addWidget(self.cmb_interval, 0, 1)
         grid.addWidget(self.lbl_latest_value, 0, 2)
         grid.setColumnStretch(3, 1)
-        grid.addWidget(self._label("live_balance_short"), 0, 4)
+        lbl_balance = self._label("live_balance_short")
+        lbl_balance.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        lbl_strategy_capital = self._label("live_strategy_capital")
+        lbl_strategy_capital.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        lbl_spot_bnb = self._label("live_spot_bnb_balance")
+        lbl_spot_bnb.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        lbl_futures_bnb = self._label("live_futures_bnb_balance")
+        lbl_futures_bnb.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+        grid.addWidget(lbl_balance, 0, 4)
         grid.addWidget(self.lbl_balance_value, 0, 5)
-        grid.addWidget(self._label("live_strategy_capital"), 0, 6)
+        grid.addWidget(lbl_strategy_capital, 0, 6)
         grid.addWidget(self.lbl_strategy_capital_value, 0, 7)
         grid.addWidget(self._label("live_risk_rate"), 0, 8)
         grid.addWidget(self.lbl_risk_value, 0, 9)
@@ -241,9 +251,9 @@ class RealtimeStrategyTab(BacktestTab):
         grid.addWidget(self.btn_start, 0, 12)
         grid.addWidget(self.btn_close, 0, 13)
         grid.addWidget(self.btn_stop, 0, 14)
-        grid.addWidget(self._label("live_spot_bnb_balance"), 1, 4)
+        grid.addWidget(lbl_spot_bnb, 1, 4)
         grid.addWidget(self.lbl_spot_bnb_value, 1, 5)
-        grid.addWidget(self._label("live_futures_bnb_balance"), 1, 6)
+        grid.addWidget(lbl_futures_bnb, 1, 6)
         grid.addWidget(self.lbl_futures_bnb_value, 1, 7)
         return box
 
@@ -719,7 +729,7 @@ class RealtimeStrategyTab(BacktestTab):
         stream.start()
 
     def _resume_live_session(self):
-        """启动完成后恢复上次因软件退出而中断的实时监听。"""
+        """仅在交易所仍有上次交易对持仓时恢复实时监听。"""
         if self._running:
             return
         session = self._db.load_live_session()
@@ -732,11 +742,32 @@ class RealtimeStrategyTab(BacktestTab):
             return
         self.cmb_symbol.setCurrentText(symbol)
         self.cmb_interval.setCurrentText(interval)
+        config = load_config()
+        if not config.has_credentials:
+            get_logger().warning("无法确认是否恢复实时策略：未配置 Binance API")
+            return
+        try:
+            client = BinanceLiveGateway(config).client
+            has_position = client.has_open_position(symbol)
+        except Exception as exc:  # noqa: BLE001
+            get_logger().warning("确认 %s 遗留持仓失败，未自动恢复交易: %s", symbol, exc)
+            return
+        if has_position is None:
+            # 查询失败时既不能冒险自动开仓，也不能清除恢复标记；保留下次
+            # 启动继续检查，同时等待用户处理网络或 API 配置问题。
+            get_logger().warning("无法确认 %s 是否有遗留持仓，未自动恢复交易", symbol)
+            return
+        if not has_position:
+            # 空仓会话不再自动预热和判断新信号。结束其自动恢复资格，等用户
+            # 点击“开始交易”后再以当时最新的已收盘 K 线预热并启动新会话。
+            self._db.deactivate_live_session()
+            get_logger().info("%s 当前无遗留持仓，等待手动点击开始交易", symbol)
+            return
         get_logger().info("正在恢复实时策略会话: %s %s", symbol, interval)
         self._start_live(session)
 
     def _evaluate_initial_signal_when_flat(self, has_position: bool) -> None:
-        """启动/恢复为空仓时，使用预热数据判断最新收盘K线信号。"""
+        """手工启动且为空仓时，使用预热数据判断最新收盘K线信号。"""
         if has_position or self._processor is None:
             return
         initial_signal = self._processor.evaluate_latest_closed()
@@ -1099,6 +1130,7 @@ class RealtimeStrategyTab(BacktestTab):
         self.lbl_spot_bnb_value.setText(f"{spot_bnb:.4f} BNB")
         self.lbl_futures_bnb_value.setText(f"{futures_bnb:.4f} BNB")
         self._strategy_capital = strategy_capital
+        self._strategy_capital_asset = futures_asset
         self._strategy_capital_from_account = True
         self._update_strategy_capital_label()
         return futures_asset, futures_balance
@@ -1132,9 +1164,10 @@ class RealtimeStrategyTab(BacktestTab):
 
     def _update_strategy_capital_label(self):
         value = self._strategy_capital
+        asset = self._strategy_capital_asset
         self.lbl_strategy_capital_value.setText(
-            f"{value:,.2f}" if self._strategy_capital_from_account
-            and value is not None else "—")
+            f"{value:,.2f} {asset}" if self._strategy_capital_from_account
+            and value is not None and asset else "—")
         if value is not None and self.sp_total_capital.value() != value:
             self.sp_total_capital.setValue(value)
 
