@@ -195,10 +195,10 @@ class RealtimeStrategyTab(BacktestTab):
         self.cmb_interval.setMinimumWidth(70)
         self.lbl_latest_value = QLabel(f"{configured} PERP  —")
         self.lbl_latest_value.setStyleSheet("color: #00a99d; font-weight: bold;")
-        self.lbl_balance_value = QLabel("—")
-        self.lbl_balance_value.setStyleSheet("color: #00a99d;")
-        self.lbl_strategy_capital_value = QLabel("—")
-        self.lbl_strategy_capital_value.setStyleSheet("color: #00a99d;")
+        self.lbl_spot_balance_value = QLabel("—")
+        self.lbl_spot_balance_value.setStyleSheet("color: #00a99d;")
+        self.lbl_futures_balance_value = QLabel("—")
+        self.lbl_futures_balance_value.setStyleSheet("color: #00a99d;")
         self.lbl_risk_value = QLabel("—")
         self.lbl_risk_value.setStyleSheet("color: #00a99d;")
         self.btn_refresh_account = QPushButton()
@@ -213,10 +213,10 @@ class RealtimeStrategyTab(BacktestTab):
         grid.addWidget(self.cmb_interval, 0, 1)
         grid.addWidget(self.lbl_latest_value, 0, 2)
         grid.setColumnStretch(3, 1)
-        grid.addWidget(self._label("live_balance_short"), 0, 4)
-        grid.addWidget(self.lbl_balance_value, 0, 5)
-        grid.addWidget(self._label("live_strategy_capital"), 0, 6)
-        grid.addWidget(self.lbl_strategy_capital_value, 0, 7)
+        grid.addWidget(self._label("live_spot_balance"), 0, 4)
+        grid.addWidget(self.lbl_spot_balance_value, 0, 5)
+        grid.addWidget(self._label("live_futures_balance"), 0, 6)
+        grid.addWidget(self.lbl_futures_balance_value, 0, 7)
         grid.addWidget(self._label("live_risk_rate"), 0, 8)
         grid.addWidget(self.lbl_risk_value, 0, 9)
         grid.addWidget(self.btn_refresh_account, 0, 10)
@@ -572,6 +572,7 @@ class RealtimeStrategyTab(BacktestTab):
                     count=len(summary["closed"])), True)
 
             self._db.sync_positions(client.get_positions())
+            self._refresh_balances(show_errors=False, client=client)
             self._refresh_record_tables()
         except Exception as exc:  # noqa: BLE001
             self._record_log(tr("realtime_close_positions_failed", err=exc), True)
@@ -905,13 +906,11 @@ class RealtimeStrategyTab(BacktestTab):
             if not account:
                 raise RuntimeError("Binance 账户接口未返回数据")
             symbol = self.cmb_symbol.currentText().strip().upper()
-            margin_asset, balance = self._wallet_balance(
-                account, symbol)
+            _margin_asset, balance = self._refresh_balance_labels(
+                client, account, symbol)
             risk = self._account_risk_ratio(account)
             if risk is None:
                 risk = client.get_account_margin_ratio()
-            self.lbl_balance_value.setText(
-                f"{balance:,.2f} {margin_asset}")
             self.lbl_risk_value.setText(
                 f"{risk * 100:.2f}%" if risk is not None else "0.00%")
             history_orders = client.get_order_history(symbol)
@@ -987,6 +986,8 @@ class RealtimeStrategyTab(BacktestTab):
             self._refresh_account(show_errors=False)
             symbol = self.cmb_symbol.currentText().strip().upper()
             self._reconcile_strategy_capital(symbol)
+        else:
+            self._refresh_balances(show_errors=False)
 
     @staticmethod
     def _account_risk_ratio(account: dict):
@@ -1034,10 +1035,58 @@ class RealtimeStrategyTab(BacktestTab):
         ), {})
         return asset_name, float(asset.get("walletBalance", 0) or 0)
 
+    @classmethod
+    def _spot_balance(cls, account: dict, symbol: str):
+        """返回所选交易对报价币种的现货总余额（可用 + 锁定）。"""
+        asset_name = cls._margin_asset_for_symbol(symbol)
+        asset = next((
+            row for row in account.get("balances", [])
+            if str(row.get("asset", "")).upper() == asset_name
+        ), {})
+        return asset_name, float(asset.get("free", 0) or 0) \
+            + float(asset.get("locked", 0) or 0)
+
+    def _refresh_balance_labels(self, client, futures_account: dict,
+                                symbol: str) -> tuple[str, float]:
+        """更新现货和合约余额标签，并返回合约 Wallet Balance。"""
+        spot_account = client.get_spot_account_info()
+        if not spot_account:
+            raise RuntimeError("Binance 现货账户接口未返回数据")
+        spot_asset, spot_balance = self._spot_balance(spot_account, symbol)
+        futures_asset, futures_balance = self._wallet_balance(
+            futures_account, symbol)
+        self.lbl_spot_balance_value.setText(
+            f"{spot_balance:,.2f} {spot_asset}")
+        self.lbl_futures_balance_value.setText(
+            f"{futures_balance:,.2f} {futures_asset}")
+        return futures_asset, futures_balance
+
+    def _refresh_balances(self, show_errors: bool = False, client=None) -> bool:
+        """只刷新顶部现货/合约余额，供定时器和完全平仓后立即调用。"""
+        try:
+            if client is None:
+                client = self._gateway.client \
+                    if self._gateway is not None else None
+            if client is None:
+                config = load_config()
+                if not config.has_credentials:
+                    raise RuntimeError(tr("live_no_credentials"))
+                client = BinanceLiveGateway(config).client
+            futures_account = client.get_account_info()
+            if not futures_account:
+                raise RuntimeError("Binance 合约账户接口未返回数据")
+            symbol = self.cmb_symbol.currentText().strip().upper()
+            self._refresh_balance_labels(client, futures_account, symbol)
+            return True
+        except Exception as exc:  # noqa: BLE001
+            get_logger().warning("刷新现货/合约账户余额失败: %s", exc)
+            if show_errors:
+                QMessageBox.warning(
+                    self, tr("app_title"), tr("live_error", err=exc))
+            return False
+
     def _update_strategy_capital_label(self):
         value = self._strategy_capital
-        self.lbl_strategy_capital_value.setText(
-            "—" if value is None else f"{value:,.2f}")
         if value is not None and self.sp_total_capital.value() != value:
             self.sp_total_capital.setValue(value)
 
@@ -1054,7 +1103,8 @@ class RealtimeStrategyTab(BacktestTab):
         try:
             values, newly_filled = self._db.upsert_order(order)
             if newly_filled:
-                balance = self._number_from_label(self.lbl_balance_value.text())
+                balance = self._number_from_label(
+                    self.lbl_futures_balance_value.text())
                 self._db.record_filled_trade(order, balance_after=balance)
             if self._is_close_trade_event(order, values):
                 if values.get("order_id"):
@@ -1141,6 +1191,9 @@ class RealtimeStrategyTab(BacktestTab):
         has_position = self._gateway.client.has_open_position(symbol)
         if has_position is not False:
             return
+        # Binance 已确认空仓后立即刷新，不等待下一个 15 秒定时周期。
+        self._refresh_balances(
+            show_errors=False, client=self._gateway.client)
         try:
             self._sync_user_trades(symbol, refresh=False)
         except Exception as exc:  # noqa: BLE001

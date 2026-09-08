@@ -47,6 +47,18 @@ def test_displayed_account_balance_uses_wallet_balance():
         account, "BTCUSDT") == ("USDT", 123.45)
 
 
+def test_spot_balance_includes_free_and_locked_quote_asset():
+    account = {"balances": [
+        {"asset": "USDT", "free": "12.25", "locked": "0.75"},
+        {"asset": "USDC", "free": "99", "locked": "1"},
+    ]}
+
+    assert RealtimeStrategyTab._spot_balance(
+        account, "BTCUSDT") == ("USDT", 13.0)
+    assert RealtimeStrategyTab._spot_balance(
+        account, "BTCUSDC") == ("USDC", 100.0)
+
+
 def test_live_price_calculates_long_unrealized_pnl():
     position = {
         "position_side": "LONG",
@@ -218,6 +230,7 @@ def test_close_trade_event_ignores_opening_trade():
 
 def test_zero_pnl_protection_exit_still_marks_exit_kline():
     canceled = []
+    refreshed = []
     client = SimpleNamespace(
         has_open_position=lambda _symbol: False,
         cancel_all_open_orders=lambda symbol: canceled.append(symbol),
@@ -231,6 +244,7 @@ def test_zero_pnl_protection_exit_still_marks_exit_kline():
         _gateway=SimpleNamespace(client=client),
         _entry_kline_index=4,
         _update_strategy_capital_label=lambda: None,
+        _refresh_balances=lambda **_kwargs: refreshed.append(True),
         _persist_live_session=lambda: None,
         _record_log=lambda *_args: None,
         _sync_user_trades=lambda *_args, **_kwargs: None,
@@ -244,9 +258,11 @@ def test_zero_pnl_protection_exit_still_marks_exit_kline():
     assert tab._pending_protection_exit is False
     assert tab._entry_kline_index is None
     assert canceled == ["BTCUSDT"]
+    assert refreshed == [True]
 
 
 def test_strategy_capital_uses_claimed_position_history_pnl():
+    refreshed = []
     client = SimpleNamespace(
         has_open_position=lambda _symbol: False,
         cancel_all_open_orders=lambda _symbol: None,
@@ -260,6 +276,7 @@ def test_strategy_capital_uses_claimed_position_history_pnl():
         _gateway=SimpleNamespace(client=client),
         _entry_kline_index=4,
         _update_strategy_capital_label=lambda: None,
+        _refresh_balances=lambda **_kwargs: refreshed.append(True),
         _persist_live_session=lambda: None,
         _record_log=lambda *_args: None,
         _sync_user_trades=lambda *_args, **_kwargs: None,
@@ -272,6 +289,19 @@ def test_strategy_capital_uses_claimed_position_history_pnl():
     assert tab._strategy_capital == 112.5
     assert tab._pending_realized_pnl == 0
     assert tab._pending_close_order_ids == set()
+    assert refreshed == [True]
+
+
+def test_balance_timer_refreshes_even_when_strategy_is_stopped():
+    refreshed = []
+    tab = SimpleNamespace(
+        _running=False,
+        _refresh_balances=lambda **kwargs: refreshed.append(kwargs),
+    )
+
+    RealtimeStrategyTab._auto_refresh_account(tab)
+
+    assert refreshed == [{"show_errors": False}]
 
 
 def test_algo_order_is_normalized_for_the_shared_order_table():

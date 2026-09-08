@@ -863,6 +863,14 @@ class BinanceClient:
             logger.debug(f"Failed to get account info: {e}")
             return {}
 
+    def get_spot_account_info(self) -> dict:
+        """Return the Binance spot account snapshot."""
+        try:
+            return self.client.get_account() or {}
+        except Exception as e:
+            logger.debug(f"Failed to get spot account info: {e}")
+            return {}
+
     def get_account_balance(self, asset: str = "USDT") -> float:
         """Return wallet balance for *asset* in the futures wallet."""
         info = self.get_account_info()

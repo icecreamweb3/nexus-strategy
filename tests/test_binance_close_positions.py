@@ -66,6 +66,18 @@ def test_mode_setters_do_not_send_changes_while_positions_exist():
     assert calls == []
 
 
+def test_spot_account_info_uses_spot_account_endpoint():
+    class RawClient:
+        @staticmethod
+        def get_account():
+            return {"balances": [{"asset": "USDT", "free": "12"}]}
+
+    client = object.__new__(BinanceClient)
+    client.client = RawClient()
+
+    assert client.get_spot_account_info()["balances"][0]["free"] == "12"
+
+
 def test_filled_trade_log_contains_fee_fields_but_not_credentials(monkeypatch):
     messages = []
 
