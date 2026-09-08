@@ -200,6 +200,10 @@ class RealtimeStrategyTab(BacktestTab):
         self.lbl_balance_value.setStyleSheet("color: #00a99d;")
         self.lbl_strategy_capital_value = QLabel("—")
         self.lbl_strategy_capital_value.setStyleSheet("color: #00a99d;")
+        self.lbl_spot_bnb_value = QLabel("—")
+        self.lbl_spot_bnb_value.setStyleSheet("color: #00a99d;")
+        self.lbl_futures_bnb_value = QLabel("—")
+        self.lbl_futures_bnb_value.setStyleSheet("color: #00a99d;")
         self.lbl_risk_value = QLabel("—")
         self.lbl_risk_value.setStyleSheet("color: #00a99d;")
         self.btn_refresh_account = QPushButton()
@@ -237,6 +241,10 @@ class RealtimeStrategyTab(BacktestTab):
         grid.addWidget(self.btn_start, 0, 12)
         grid.addWidget(self.btn_close, 0, 13)
         grid.addWidget(self.btn_stop, 0, 14)
+        grid.addWidget(self._label("live_spot_bnb_balance"), 1, 4)
+        grid.addWidget(self.lbl_spot_bnb_value, 1, 5)
+        grid.addWidget(self._label("live_futures_bnb_balance"), 1, 6)
+        grid.addWidget(self.lbl_futures_bnb_value, 1, 7)
         return box
 
     def _build_live_orders_section(self) -> QGroupBox:
@@ -433,7 +441,7 @@ class RealtimeStrategyTab(BacktestTab):
             if has_position and not positions:
                 raise RuntimeError(f"{symbol} 当前持仓数据不完整")
             if resume_session:
-                _pnl, claimed = self._db.claim_unapplied_session_pnl(
+                pnl, claimed = self._db.claim_unapplied_session_pnl(
                     symbol, self._session_started_at)
                 if claimed:
                     # _refresh_account 已直接从现货 + 合约余额恢复策略资金；
@@ -1050,6 +1058,26 @@ class RealtimeStrategyTab(BacktestTab):
         return asset_name, float(asset.get("free", 0) or 0) \
             + float(asset.get("locked", 0) or 0)
 
+    @staticmethod
+    def _spot_asset_total(account: dict, asset_name: str) -> float:
+        """返回指定现货资产的可用与锁定数量之和。"""
+        asset = next((
+            row for row in account.get("balances", [])
+            if str(row.get("asset", "")).upper() == asset_name.upper()
+        ), {})
+        return float(asset.get("free", 0) or 0) \
+            + float(asset.get("locked", 0) or 0)
+
+    @staticmethod
+    def _futures_asset_wallet_balance(
+            account: dict, asset_name: str) -> float:
+        """返回指定合约账户资产的 Wallet Balance 数量。"""
+        asset = next((
+            row for row in account.get("assets", [])
+            if str(row.get("asset", "")).upper() == asset_name.upper()
+        ), {})
+        return float(asset.get("walletBalance", 0) or 0)
+
     def _refresh_balance_labels(self, client, futures_account: dict,
                                 symbol: str) -> tuple[str, float]:
         """Balance 显示合约余额，Strategy Balance 显示现货 + 合约。"""
@@ -1062,9 +1090,14 @@ class RealtimeStrategyTab(BacktestTab):
         _spot_asset, spot_balance = self._spot_balance(spot_account, symbol)
         futures_asset, futures_balance = self._wallet_balance(
             futures_account, symbol)
+        spot_bnb = self._spot_asset_total(spot_account, "BNB")
+        futures_bnb = self._futures_asset_wallet_balance(
+            futures_account, "BNB")
         strategy_capital = spot_balance + futures_balance
         self.lbl_balance_value.setText(
             f"{futures_balance:,.2f} {futures_asset}")
+        self.lbl_spot_bnb_value.setText(f"{spot_bnb:.4f} BNB")
+        self.lbl_futures_bnb_value.setText(f"{futures_bnb:.4f} BNB")
         self._strategy_capital = strategy_capital
         self._strategy_capital_from_account = True
         self._update_strategy_capital_label()

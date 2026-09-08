@@ -36,6 +36,8 @@
   "realtime_sync_completed": "已根据 Binance 成交记录完成订单和历史持仓同步",
   "live_balance_short": "余额：",
   "live_strategy_capital": "策略资金：",
+  "live_spot_bnb_balance": "现货 BNB：",
+  "live_futures_bnb_balance": "合约 BNB：",
   "live_risk_rate": "账户风险率：",
   "live_start_trading": "开始交易",
   "live_close_trading": "关闭交易",

@@ -316,21 +316,31 @@ def test_balance_is_futures_and_strategy_balance_is_spot_plus_futures():
         _strategy_capital_from_account=False,
         lbl_balance_value=ValueWidget(),
         lbl_strategy_capital_value=ValueWidget(),
+        lbl_spot_bnb_value=ValueWidget(),
+        lbl_futures_bnb_value=ValueWidget(),
         sp_total_capital=ValueWidget(),
         _spot_balance=lambda _account, _symbol: ("USDT", 20.0),
         _wallet_balance=lambda _account, _symbol: ("USDT", 80.0),
+        _spot_asset_total=RealtimeStrategyTab._spot_asset_total,
+        _futures_asset_wallet_balance=(
+            RealtimeStrategyTab._futures_asset_wallet_balance),
     )
     tab._update_strategy_capital_label = lambda: (
         RealtimeStrategyTab._update_strategy_capital_label(tab))
-    client = SimpleNamespace(
-        get_spot_account_info=lambda: {"balances": []})
+    client = SimpleNamespace(get_spot_account_info=lambda: {"balances": [
+        {"asset": "BNB", "free": "1.25", "locked": "0.05"},
+    ]})
 
     asset, futures_balance = RealtimeStrategyTab._refresh_balance_labels(
-        tab, client, {"assets": []}, "BTCUSDT")
+        tab, client, {"assets": [{
+            "asset": "BNB", "walletBalance": "2.5",
+        }]}, "BTCUSDT")
 
     assert (asset, futures_balance) == ("USDT", 80.0)
     assert tab.lbl_balance_value.current == "80.00 USDT"
     assert tab.lbl_strategy_capital_value.current == "100.00"
+    assert tab.lbl_spot_bnb_value.current == "1.3000 BNB"
+    assert tab.lbl_futures_bnb_value.current == "2.5000 BNB"
     assert tab._strategy_capital == 100.0
 
 
