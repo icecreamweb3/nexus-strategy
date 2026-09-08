@@ -1,6 +1,19 @@
 from app.client.binance_client import BinanceClient, _log_filled_trade_response
 
 
+class CapturingLogger:
+    def __init__(self):
+        self.messages = []
+
+    def _capture(self, message, *args):
+        self.messages.append(message % args)
+
+    info = _capture
+    warning = _capture
+    error = _capture
+    exception = _capture
+
+
 class FakePositionClient:
     def __init__(self, failed_symbol=None):
         self.failed_symbol = failed_symbol
@@ -244,6 +257,40 @@ def test_close_all_positions_continues_after_one_position_fails():
         "quantity": 0.001,
         "error": "rejected",
     }]
+
+
+def test_close_position_writes_request_and_result_to_system_log(monkeypatch):
+    captured = CapturingLogger()
+    client = object.__new__(BinanceClient)
+    client.get_position_mode = lambda: False
+    client.place_market_order = lambda **_kwargs: {
+        "orderId": 123, "status": "FILLED", "executedQty": "0.01",
+        "avgPrice": "80000",
+    }
+    monkeypatch.setattr(
+        "app.client.binance_client.get_logger", lambda: captured)
+
+    result = BinanceClient.close_position(client, "BTCUSDT", 0.01, "LONG")
+
+    assert result["orderId"] == 123
+    output = "\n".join(captured.messages)
+    assert "提交市价平仓订单" in output
+    assert "市价平仓订单已提交" in output
+    assert "order_id=123" in output
+
+
+def test_close_all_positions_logs_completion_summary(monkeypatch):
+    captured = CapturingLogger()
+    client = FakePositionClient()
+    monkeypatch.setattr(
+        "app.client.binance_client.get_logger", lambda: captured)
+
+    BinanceClient.close_all_positions(client)
+
+    output = "\n".join(captured.messages)
+    assert "开始关闭账户全部头寸" in output
+    assert "关闭头寸订单核验" in output
+    assert "closed=2 failed=0" in output
 
 
 def test_cancel_all_open_orders_cancels_regular_and_algo_then_confirms():

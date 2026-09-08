@@ -3326,10 +3326,13 @@ class BinanceClient:
         Returns:
             Order result dict if successful, None otherwise
         """
+        close_logger = get_logger()
         try:
             
             if quantity == 0:
-                logger.debug(f"No position to close for {symbol}")
+                close_logger.info(
+                    "跳过平仓：symbol=%s side=%s quantity=0，无可关闭头寸",
+                    symbol, current_side)
                 return None            
             
             # For closing: LONG position needs SELL, SHORT position needs BUY
@@ -3340,13 +3343,16 @@ class BinanceClient:
             # 即使 get_position_mode() 因时间戳等错误失败，也不会错误地以单向模式平仓（导致开反向仓）
             position_mode = self.get_position_mode()
             if position_mode is None:
-                logger.warning(f"⚠️ get_position_mode() 失败，默认使用对冲模式（双向持仓）: symbol={symbol}, side={current_side}")
+                close_logger.warning(
+                    "平仓前获取持仓模式失败，按对冲模式处理: symbol=%s side=%s",
+                    symbol, current_side)
                 position_mode = True  # 默认对冲模式
 
             mode_label = 'hedge' if position_mode is True else 'one_way'
             reduce_only = position_mode is False
-            logger.info(
-                "[BinanceClient] close_position: symbol=%s current_side=%s order_side=%s qty=%s position_mode=%s reduce_only=%s",
+            close_logger.info(
+                "提交市价平仓订单: symbol=%s current_side=%s order_side=%s "
+                "quantity=%s position_mode=%s reduce_only=%s",
                 symbol,
                 current_side,
                 order_side,
@@ -3358,7 +3364,7 @@ class BinanceClient:
             # Use market order to close position
             if position_mode is True:
                 # Hedge Mode: Use position_side, do NOT use reduceOnly
-                return self.place_market_order(
+                result = self.place_market_order(
                     symbol=symbol,
                     side=order_side,
                     quantity=quantity,
@@ -3367,23 +3373,44 @@ class BinanceClient:
                 )
             else:
                 # One-way Mode: Use reduceOnly, do NOT use position_side
-                return self.place_market_order(
+                result = self.place_market_order(
                     symbol=symbol,
                     side=order_side,
                     quantity=quantity,
                     position_side=None,  # Not needed in one-way mode
                     reduce_only=True  # Required for one-way mode to close position
                 )
+            if not result or result.get('error'):
+                close_logger.error(
+                    "市价平仓订单提交失败: symbol=%s side=%s quantity=%s error=%s",
+                    symbol, current_side, quantity,
+                    result.get('error_message', '接口未返回结果')
+                    if isinstance(result, dict) else '接口未返回结果')
+            else:
+                close_logger.info(
+                    "市价平仓订单已提交: symbol=%s side=%s quantity=%s "
+                    "order_id=%s status=%s executed_qty=%s avg_price=%s",
+                    symbol, current_side, quantity, result.get('orderId'),
+                    result.get('status'), result.get('executedQty'),
+                    result.get('avgPrice'))
+            return result
         except Exception as e:
-            logger.debug(f"Failed to close position for {symbol}: {e}")
-            logger.exception(f"平仓异常详情")
+            close_logger.exception(
+                "市价平仓异常: symbol=%s side=%s quantity=%s error=%s",
+                symbol, current_side, quantity, e)
             return None
 
     def close_all_positions(self) -> dict:
         """以市价单逐一平掉账户中当前所有合约持仓。"""
+        close_logger = get_logger()
         closed = []
         failed = []
-        positions = self.get_positions()
+        try:
+            positions = self.get_positions()
+        except Exception as exc:
+            close_logger.exception("关闭全部头寸前查询持仓失败: %s", exc)
+            raise
+        close_logger.info("开始关闭账户全部头寸: position_rows=%d", len(positions))
         for position in positions:
             symbol = str(position.get('symbol', '')).upper()
             try:
@@ -3399,6 +3426,9 @@ class BinanceClient:
                 if not result or result.get('error'):
                     message = result.get('error_message', '平仓接口未返回结果') \
                         if isinstance(result, dict) else '平仓接口未返回结果'
+                    close_logger.error(
+                        "关闭头寸失败: symbol=%s side=%s quantity=%s error=%s",
+                        symbol, side, quantity, message)
                     failed.append({
                         'symbol': symbol, 'side': side,
                         'quantity': quantity, 'error': message,
@@ -3407,11 +3437,21 @@ class BinanceClient:
                 order_id = result.get('orderId')
                 final_order = self.get_order_status(symbol, str(order_id)) \
                     if order_id is not None else None
+                confirmed_order = final_order or result
+                close_logger.info(
+                    "关闭头寸订单核验: symbol=%s side=%s quantity=%s "
+                    "order_id=%s status=%s executed_qty=%s avg_price=%s",
+                    symbol, side, quantity, order_id,
+                    confirmed_order.get('status'),
+                    confirmed_order.get('executedQty'),
+                    confirmed_order.get('avgPrice'))
                 closed.append({
                     'symbol': symbol, 'side': side, 'quantity': quantity,
-                    'order': final_order or result,
+                    'order': confirmed_order,
                 })
             except Exception as exc:
+                close_logger.exception(
+                    "关闭头寸处理异常: symbol=%s error=%s", symbol or '?', exc)
                 failed.append({
                     'symbol': symbol or '?',
                     'side': str(position.get('positionSide', '') or '?'),
@@ -3419,6 +3459,10 @@ class BinanceClient:
                         'positionAmt', position.get('quantity', 0)) or 0)),
                     'error': str(exc),
                 })
+        log_method = close_logger.warning if failed else close_logger.info
+        log_method(
+            "关闭账户全部头寸流程完成: closed=%d failed=%d",
+            len(closed), len(failed))
         return {'closed': closed, 'failed': failed}
 
     def cancel_all_open_orders(self, symbol: str | None = None) -> dict:

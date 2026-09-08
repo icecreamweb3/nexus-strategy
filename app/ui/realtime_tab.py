@@ -540,6 +540,8 @@ class RealtimeStrategyTab(BacktestTab):
 
     def _close_all_positions_and_stop(self):
         """停止策略并市价平掉 Binance 账户的全部当前持仓。"""
+        operation_logger = get_logger()
+        operation_logger.info("用户触发“关闭交易”：开始平仓并撤销全部委托")
         client = self._gateway.client if self._gateway is not None else None
         self._running = False
         self._placing_order = True
@@ -565,6 +567,15 @@ class RealtimeStrategyTab(BacktestTab):
                     side=item["side"], quantity=f"{item['quantity']:g}"), True)
 
             cancel_summary = client.cancel_all_open_orders()
+            canceled_orders = cancel_summary.get("canceled", [])
+            operation_logger.info(
+                "关闭交易撤单结果: canceled_regular=%d canceled_algo=%d "
+                "failed=%d remaining_regular=%d remaining_algo=%d",
+                sum(item.get("kind") == "regular" for item in canceled_orders),
+                sum(item.get("kind") == "algo" for item in canceled_orders),
+                len(cancel_summary["failed"]),
+                len(cancel_summary["remaining_regular"]),
+                len(cancel_summary["remaining_algo"]))
             failures = summary["failed"] + cancel_summary["failed"]
             if cancel_summary["remaining_regular"] or cancel_summary["remaining_algo"]:
                 failures.append({
@@ -587,15 +598,20 @@ class RealtimeStrategyTab(BacktestTab):
                 QMessageBox.warning(
                     self, tr("app_title"),
                     tr("realtime_close_positions_partial", err=detail))
+                operation_logger.warning("关闭交易未完全成功: %s", detail)
             else:
                 self._record_log(tr(
                     "realtime_all_positions_closed",
                     count=len(summary["closed"])), True)
+                operation_logger.info(
+                    "关闭交易完成并确认账户无持仓、无未成交委托: closed=%d",
+                    len(summary["closed"]))
 
             self._db.sync_positions(client.get_positions())
             self._refresh_balances(show_errors=False, client=client)
             self._refresh_record_tables()
         except Exception as exc:  # noqa: BLE001
+            operation_logger.exception("关闭交易流程异常: %s", exc)
             self._record_log(tr("realtime_close_positions_failed", err=exc), True)
             QMessageBox.warning(
                 self, tr("app_title"),
@@ -661,6 +677,11 @@ class RealtimeStrategyTab(BacktestTab):
         client = self._gateway.client
         positions = client.get_positions(symbol)
         try:
+            get_logger().info(
+                "触发最长持仓平仓: symbol=%s current_kline=%s "
+                "entry_kline=%s limit=%s position_rows=%d",
+                symbol, current_kline, self._entry_kline_index,
+                limit, len(positions))
             self._placing_order = True
             for position in positions:
                 amount = float(position.get(
@@ -699,8 +720,14 @@ class RealtimeStrategyTab(BacktestTab):
             self._record_log(tr(
                 "realtime_time_position_closed", symbol=symbol,
                 kline=current_kline), True)
+            get_logger().info(
+                "最长持仓平仓完成: symbol=%s kline=%s，保护委托已撤销",
+                symbol, current_kline)
             return True
         except Exception as exc:  # noqa: BLE001
+            get_logger().exception(
+                "最长持仓平仓失败: symbol=%s kline=%s error=%s",
+                symbol, current_kline, exc)
             self._record_log(tr("realtime_time_close_failed", err=exc), True)
             QMessageBox.warning(self, tr("app_title"), tr(
                 "realtime_time_close_failed", err=exc))
@@ -1187,11 +1214,21 @@ class RealtimeStrategyTab(BacktestTab):
                 balance = self._number_from_label(
                     self.lbl_balance_value.text())
                 self._db.record_filled_trade(order, balance_after=balance)
-            if self._is_close_trade_event(order, values):
+            is_close_trade = self._is_close_trade_event(order, values)
+            if is_close_trade:
                 if values.get("order_id"):
                     self._pending_close_order_ids.add(values["order_id"])
                 if values.get("action_type") in ("TP", "SL"):
                     self._pending_protection_exit = True
+                if newly_filled:
+                    get_logger().info(
+                        "检测到平仓成交: symbol=%s action=%s order_id=%s "
+                        "side=%s quantity=%s avg_price=%s realized_pnl=%s",
+                        values.get("symbol"), values.get("action_type"),
+                        values.get("order_id"), values.get("side"),
+                        values.get("filled_quantity"),
+                        values.get("filled_price"),
+                        values.get("realized_pnl"))
             self._apply_realized_pnl_if_position_closed(order)
             self._refresh_record_tables()
         except Exception as exc:  # noqa: BLE001
@@ -1285,6 +1322,7 @@ class RealtimeStrategyTab(BacktestTab):
             self._pending_close_order_ids)
         if claimed == 0:
             return
+        closed_order_ids = sorted(self._pending_close_order_ids)
         self._pending_close_order_ids.clear()
         self._pending_realized_pnl = 0.0
         self._entry_kline_index = None
@@ -1295,7 +1333,15 @@ class RealtimeStrategyTab(BacktestTab):
         self._update_strategy_capital_label()
         self._persist_live_session()
         # 完全平仓后撤掉另一侧仍存活的 TP/SL，避免旧保护单遗留。
-        self._gateway.client.cancel_all_open_orders(symbol)
+        cancel_summary = self._gateway.client.cancel_all_open_orders(symbol) or {}
+        get_logger().info(
+            "已确认头寸完全关闭: symbol=%s close_order_ids=%s "
+            "realized_pnl=%s claimed=%s cancel_failed=%d "
+            "remaining_regular=%d remaining_algo=%d",
+            symbol, closed_order_ids, pnl, claimed,
+            len(cancel_summary.get("failed", [])),
+            len(cancel_summary.get("remaining_regular", [])),
+            len(cancel_summary.get("remaining_algo", [])))
         if pnl != 0:
             self._record_log(tr(
                 "realtime_strategy_capital_updated", pnl=f"{pnl:+.2f}",
