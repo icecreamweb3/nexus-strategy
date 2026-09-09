@@ -1510,7 +1510,8 @@ class RealtimeStrategyTab(BacktestTab):
         self._current_position_rows = positions
         self._fill_table(self.position_table, positions, [
             "symbol", "position_mode", "position_side", lambda r: n(r["quantity"]),
-            lambda r: n(r["avg_entry_price"], 2), lambda r: local_time(r["updated_at"]),
+            lambda r: n(r["avg_entry_price"], 2),
+            lambda r: local_time(r["opened_at"] or r["updated_at"]),
             lambda r: n(self._position_unrealized_pnl(r)), lambda r: n(r["tp_price"], 2),
             lambda r: n(r["sl_price"], 2), lambda r: n(r["liquidation_price"], 2),
         ], pnl_columns=(6,))

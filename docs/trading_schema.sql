@@ -71,6 +71,7 @@ CREATE TABLE IF NOT EXISTS orders (
     realized_pnl                        REAL,
     commission                          REAL,
     commission_asset                    TEXT,
+    commission_value                    REAL,
     trade_details_sync_attempts         INTEGER   NOT NULL DEFAULT 0,
     trade_details_sync_next_retry_at    TEXT,
     trade_details_sync_last_error       TEXT,
@@ -102,6 +103,8 @@ CREATE TABLE IF NOT EXISTS positions (
     leverage          INTEGER NOT NULL DEFAULT 1,
     margin_type       TEXT    NOT NULL DEFAULT 'CROSS'
                             CHECK (margin_type IN ('ISOLATED', 'CROSS')),
+    -- 首次建仓成交时间；仓位刷新不更新，平仓后重新建仓时重置。
+    opened_at         TEXT,
     updated_at        TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -119,6 +122,7 @@ CREATE TABLE IF NOT EXISTS positions_history (
     realized_pnl     REAL    NOT NULL DEFAULT 0.0,
     commission       REAL    NOT NULL DEFAULT 0.0,
     commission_asset TEXT,
+    commission_value REAL,
     position_id      INTEGER,
     created_at       TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at       TEXT    NOT NULL DEFAULT CURRENT_TIMESTAMP

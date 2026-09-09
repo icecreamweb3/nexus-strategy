@@ -99,6 +99,7 @@ CREATE TABLE IF NOT EXISTS positions (
     leverage INTEGER NOT NULL DEFAULT 1,
     margin_type TEXT NOT NULL DEFAULT 'CROSS'
         CHECK (margin_type IN ('ISOLATED', 'CROSS')),
+    opened_at TEXT,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -218,6 +219,26 @@ class TradingDatabase:
                 if "commission_value" not in columns:
                     connection.execute(
                         f"ALTER TABLE {table} ADD COLUMN commission_value REAL")
+            position_columns = {
+                row[1] for row in connection.execute(
+                    "PRAGMA table_info(positions)").fetchall()
+            }
+            if "opened_at" not in position_columns:
+                connection.execute(
+                    "ALTER TABLE positions ADD COLUMN opened_at TEXT")
+                # 活动会话保存的是真实开仓成交时间。升级旧数据库时优先用它
+                # 修复仍在持有的仓位，不能拿最后同步时间冒充开仓时间。
+                session = connection.execute(
+                    "SELECT symbol, entry_time_ms FROM live_session_state "
+                    "WHERE id=1 AND active=1 AND entry_time_ms IS NOT NULL"
+                ).fetchone()
+                if session:
+                    connection.execute(
+                        "UPDATE positions SET opened_at=? "
+                        "WHERE status='OPEN' AND symbol=?",
+                        (_event_time(session["entry_time_ms"]),
+                         str(session["symbol"]).upper()),
+                    )
             for table in ("orders", "positions_history"):
                 connection.execute(
                     f"UPDATE {table} SET commission_value=commission "
@@ -398,6 +419,9 @@ class TradingDatabase:
                 margin_type = str(raw.get("marginType", "CROSS") or "CROSS").upper()
                 if margin_type not in ("ISOLATED", "CROSS"):
                     margin_type = "CROSS"
+                entry_time = raw.get("entryTime", raw.get("openTime"))
+                opened_at = _event_time(entry_time) \
+                    if entry_time not in (None, "", 0, "0") else now
                 values = (
                     "binance", symbol, side,
                     str(raw.get("positionMode", "UNKNOWN") or "UNKNOWN").upper(),
@@ -407,13 +431,15 @@ class TradingDatabase:
                     _float(raw.get("slPrice", 0)) or None,
                     _float(raw.get("unrealizedProfit", raw.get("unRealizedProfit", 0))),
                     _float(raw.get("realizedPnl", 0)),
-                    int(_float(raw.get("leverage", 1), 1)), margin_type, now,
+                    int(_float(raw.get("leverage", 1), 1)), margin_type,
+                    opened_at, now,
                 )
                 connection.execute(
                     "INSERT INTO positions (exchange, symbol, position_side, "
                     "position_mode, status, quantity, avg_entry_price, liquidation_price, "
                     "tp_price, sl_price, unrealized_pnl, realized_pnl, leverage, "
-                    "margin_type, updated_at) VALUES (?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                    "margin_type, opened_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, 'OPEN', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                     "ON CONFLICT(exchange, symbol, position_side) DO UPDATE SET "
                     "position_mode=excluded.position_mode, status='OPEN', "
                     "quantity=excluded.quantity, avg_entry_price=excluded.avg_entry_price, "
@@ -422,7 +448,11 @@ class TradingDatabase:
                     "sl_price=COALESCE(excluded.sl_price, positions.sl_price), "
                     "unrealized_pnl=excluded.unrealized_pnl, "
                     "realized_pnl=excluded.realized_pnl, leverage=excluded.leverage, "
-                    "margin_type=excluded.margin_type, updated_at=excluded.updated_at",
+                    "margin_type=excluded.margin_type, "
+                    "opened_at=CASE WHEN positions.status='OPEN' "
+                    "THEN COALESCE(positions.opened_at, excluded.opened_at) "
+                    "ELSE excluded.opened_at END, "
+                    "updated_at=excluded.updated_at",
                     values,
                 )
 
@@ -473,7 +503,7 @@ class TradingDatabase:
                             close_order["commission"] if close_order else 0,
                             close_order["commission_asset"] if close_order else None,
                             close_order["commission_value"] if close_order else 0,
-                            row["id"], row["updated_at"], now,
+                            row["id"], row["opened_at"] or row["updated_at"], now,
                         ),
                     )
                 connection.execute(

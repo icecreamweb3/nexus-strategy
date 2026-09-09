@@ -1,3 +1,5 @@
+import sqlite3
+
 from app.storage.trading_db import TradingDatabase
 
 
@@ -82,6 +84,76 @@ def test_position_protection_prices_survive_position_refresh(tmp_path):
     current = database.current_positions()[0]
     assert current["tp_price"] == 78275
     assert current["sl_price"] == 76725
+
+
+def test_position_open_time_survives_position_refresh(tmp_path):
+    database = TradingDatabase(str(tmp_path / "trading.sqlite3"))
+    position = {
+        "symbol": "BTCUSDT", "positionSide": "BOTH",
+        "positionAmt": "-0.005", "entryPrice": "79221.8",
+        "openTime": 1_788_946_870_609,
+    }
+
+    database.sync_positions([position])
+    first = database.current_positions()[0]
+
+    database.sync_positions([{**position, "openTime": 1_788_947_088_000}])
+    refreshed = database.current_positions()[0]
+
+    assert first["opened_at"] == "2026-09-09T09:41:10+00:00"
+    assert refreshed["opened_at"] == first["opened_at"]
+    assert refreshed["updated_at"] >= first["updated_at"]
+
+
+def test_reopened_position_gets_a_new_open_time(tmp_path):
+    database = TradingDatabase(str(tmp_path / "trading.sqlite3"))
+    base = {
+        "symbol": "BTCUSDT", "positionSide": "BOTH",
+        "positionAmt": "0.005", "entryPrice": "79000",
+    }
+    database.sync_positions([{**base, "openTime": 1_700_000_000_000}])
+    database.sync_positions([], symbols=("BTCUSDT",))
+
+    database.sync_positions([{**base, "openTime": 1_700_000_060_000}])
+
+    assert database.current_positions()[0]["opened_at"] \
+        == "2023-11-14T22:14:20+00:00"
+
+
+def test_old_database_migration_restores_open_time_from_live_session(tmp_path):
+    path = tmp_path / "trading.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "CREATE TABLE positions ("
+            "id INTEGER PRIMARY KEY, exchange TEXT, symbol TEXT, "
+            "position_side TEXT, status TEXT, updated_at TEXT)"
+        )
+        connection.execute(
+            "CREATE UNIQUE INDEX ux_positions_exchange_symbol_side "
+            "ON positions(exchange, symbol, position_side)"
+        )
+        connection.execute(
+            "CREATE TABLE live_session_state ("
+            "id INTEGER PRIMARY KEY, active INTEGER, symbol TEXT, "
+            "interval TEXT, strategy_capital REAL, entry_time_ms INTEGER, "
+            "started_at TEXT, updated_at TEXT)"
+        )
+        connection.execute(
+            "INSERT INTO positions VALUES "
+            "(1, 'binance', 'BTCUSDT', 'SHORT', 'OPEN', "
+            "'2026-09-09T09:47:47+00:00')"
+        )
+        connection.execute(
+            "INSERT INTO live_session_state VALUES "
+            "(1, 1, 'BTCUSDT', '1m', 100, 1788946870609, "
+            "'2026-09-09T09:40:54+00:00', "
+            "'2026-09-09T09:47:47+00:00')"
+        )
+
+    database = TradingDatabase(str(path))
+
+    assert database.current_positions()[0]["opened_at"] \
+        == "2026-09-09T09:41:10+00:00"
 
 
 def test_user_trades_rebuild_closed_position_and_update_order(tmp_path):
