@@ -496,6 +496,11 @@ class BacktestEngine:
                 str(k.open_time).strip())
             timestamp = datetime.fromisoformat(
                 raw_time.replace("Z", "+00:00"))
+            # Live K-lines are kept as timezone-aware UTC internally.  Convert
+            # only for presentation; imported backtest timestamps without a
+            # timezone retain their original wall-clock value.
+            if timestamp.tzinfo is not None:
+                timestamp = timestamp.astimezone()
             time_text = timestamp.strftime("%Y-%m-%dT%H:%M:%S")
         except ValueError:
             time_text = str(k.open_time)

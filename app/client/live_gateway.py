@@ -39,7 +39,7 @@ class BinanceLiveGateway:
     def kline_from_rest(row, index: int) -> Kline:
         timestamp = datetime.fromtimestamp(
             int(row[0]) / 1000, tz=timezone.utc,
-        ).astimezone().replace(tzinfo=None).isoformat(timespec="seconds")
+        ).isoformat(timespec="seconds")
         return Kline(index, timestamp, float(row[1]), float(row[2]),
                      float(row[3]), float(row[4]), float(row[5]))
 

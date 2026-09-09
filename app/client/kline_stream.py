@@ -76,7 +76,7 @@ class KlineStream(QObject):
         try:
             open_time = datetime.fromtimestamp(
                 int(raw["t"]) / 1000, tz=timezone.utc,
-            ).astimezone().replace(tzinfo=None).isoformat(timespec="seconds")
+            ).isoformat(timespec="seconds")
             self.closed_kline.emit(Kline(
                 index=0,
                 open_time=open_time,

@@ -96,6 +96,22 @@ def test_entry_time_is_mapped_back_to_reloaded_kline_index():
     assert RealtimeStrategyTab._kline_index_for_time(klines, 0) == 0
 
 
+def test_utc_entry_time_is_mapped_without_timezone_offset():
+    entry = datetime(2026, 9, 9, 5, 15, tzinfo=timezone.utc)
+    klines = [
+        SimpleNamespace(
+            index=index,
+            open_time=(datetime(2026, 9, 9, 5, 7 + index - 1,
+                                tzinfo=timezone.utc)
+                       .isoformat(timespec="seconds")),
+        )
+        for index in range(1, 10)
+    ]
+
+    assert RealtimeStrategyTab._kline_index_for_time(
+        klines, int(entry.timestamp() * 1000)) == 9
+
+
 def test_window_close_preserves_active_live_session():
     calls = []
     price_stream = SimpleNamespace(stop=lambda: calls.append("price-stop"))

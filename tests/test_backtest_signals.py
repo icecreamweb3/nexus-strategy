@@ -1,4 +1,5 @@
 import unittest
+from datetime import datetime, timezone
 
 from app.backtest.data_loader import Kline
 from app.backtest.engine import BacktestEngine, LONG, SHORT, OrderParams, StrategyParams
@@ -176,6 +177,20 @@ class SignalRuleTests(unittest.TestCase):
             "成交量:34.946 | 参数检测: "))
         self.assertIn("K线连续性: ✗ [1/2]", messages[0])
         self.assertIn("单根涨跌幅: ✓ [未启用]", messages[0])
+
+    def test_utc_kline_log_is_displayed_in_local_time(self):
+        messages = []
+        utc_time = datetime(2026, 9, 9, 5, 15, tzinfo=timezone.utc)
+        expected_local = utc_time.astimezone().strftime("%Y-%m-%dT%H:%M:%S")
+        engine = BacktestEngine(
+            [Kline(1, utc_time.isoformat(), 100, 101, 99, 100, 10)],
+            params(), OrderParams(),
+            log=lambda message, triggered=False: messages.append(message),
+        )
+
+        engine._log_kline(0)
+
+        self.assertIn(f"K线 #1 | {expected_local} |", messages[0])
 
     def test_kline_log_supports_english_display(self):
         messages = []
