@@ -68,6 +68,24 @@ def test_reduce_only_one_way_order_uses_position_direction(tmp_path):
     assert values["use_type"] == "TP_CLOSE"
 
 
+def test_algo_update_reclassifies_existing_actual_market_order(tmp_path):
+    database = TradingDatabase(str(tmp_path / "trading.sqlite3"))
+    database.upsert_order(_order(
+        "FILLED", orderId="901", side="SELL", executedQty="0.01",
+        avgPrice="99", realizedPnl="-1"))
+
+    database.upsert_order(_order(
+        "FINISHED", orderId="900", side="SELL", type="STOP_MARKET",
+        ai="901", reduceOnly=True))
+
+    actual = database.rows(
+        "SELECT action_type, use_type, reduce_only FROM orders "
+        "WHERE order_id='901'")[0]
+    assert actual["action_type"] == "SL"
+    assert actual["use_type"] == "SL_CLOSE"
+    assert actual["reduce_only"] == 1
+
+
 def test_position_protection_prices_survive_position_refresh(tmp_path):
     database = TradingDatabase(str(tmp_path / "trading.sqlite3"))
     position = {

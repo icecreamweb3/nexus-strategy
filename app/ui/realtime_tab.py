@@ -53,6 +53,9 @@ class RealtimeStrategyTab(BacktestTab):
         self._session_started_at = None
         self._exit_since_last_closed_kline = False
         self._pending_protection_exit = False
+        self._protection_actions_by_order_id = {}
+        self._pending_close_event_times = {}
+        self._exit_event_times_ms = set()
         self._latest_close = None
         self._live_prices = {}
         self._current_position_rows = []
@@ -436,6 +439,9 @@ class RealtimeStrategyTab(BacktestTab):
                 resume_session.get("entry_time_ms") if resume_session else None)
             self._exit_since_last_closed_kline = False
             self._pending_protection_exit = False
+            self._protection_actions_by_order_id.clear()
+            self._pending_close_event_times.clear()
+            self._exit_event_times_ms.clear()
             self._update_strategy_capital_label()
             self._log_lines.clear()
             self._page = 0
@@ -531,6 +537,9 @@ class RealtimeStrategyTab(BacktestTab):
         self._session_started_at = None
         self._exit_since_last_closed_kline = False
         self._pending_protection_exit = False
+        self._protection_actions_by_order_id.clear()
+        self._pending_close_event_times.clear()
+        self._exit_event_times_ms.clear()
         self._update_strategy_capital_label()
         self._close_live_log()
         self.cmb_symbol.setEnabled(True)
@@ -657,13 +666,57 @@ class RealtimeStrategyTab(BacktestTab):
         self.klines = self._processor.klines
         self._latest_close = kline.close
         exited = self._exit_since_last_closed_kline
+        exited = self._consume_exit_for_kline(kline) or exited
         exited = self._close_on_time_limit(kline.index) or exited
         self._exit_since_last_closed_kline = False
+        # 订单流和 K 线流相互独立。若止损成交消息尚未到达，但交易所已
+        # 经确认空仓，仍必须把刚收盘的这一根视为退出 K 线。
+        if not self._processor.order.exit_bar_signal_enabled and not exited \
+                and self._entry_kline_index is not None \
+                and self._gateway is not None:
+            symbol = self.cmb_symbol.currentText().strip().upper()
+            has_position = self._gateway.client.has_open_position(symbol)
+            if has_position is not True:
+                exited = True
+                if has_position is None:
+                    get_logger().warning(
+                        "K线收盘时无法确认 %s 持仓，安全跳过本根信号判断",
+                        symbol)
+                else:
+                    get_logger().info(
+                        "K线收盘前已确认 %s 空仓，将 K线 #%s 标记为退出K线",
+                        symbol, kline.index)
         signal = None
         if self._processor.order.exit_bar_signal_enabled or not exited:
             signal = self._processor.evaluate_latest_closed()
         if signal is not None:
             self._place_signal_order(signal)
+
+    def _consume_exit_for_kline(self, kline) -> bool:
+        """按成交时间消费属于当前 K 线的退出事件，不把迟到事件挪到下一根。"""
+        event_times = getattr(self, "_exit_event_times_ms", None)
+        if not event_times:
+            return False
+        open_ms = LiveSignalProcessor._time_key(kline)
+        step_ms = None
+        if self._processor is not None and len(self._processor.klines) >= 2:
+            previous = self._processor.klines[-2]
+            candidate = open_ms - LiveSignalProcessor._time_key(previous)
+            if candidate > 0:
+                step_ms = candidate
+        if step_ms is None:
+            # 实盘预热至少有两根；该兜底只用于异常/测试输入。
+            step_ms = 60_000
+        close_ms = open_ms + step_ms
+        matched = {value for value in event_times
+                   if open_ms <= value < close_ms}
+        stale = {value for value in event_times if value < open_ms}
+        event_times.difference_update(matched | stale)
+        if stale:
+            get_logger().warning(
+                "收到迟到的退出成交事件，已对应到已处理K线，不顺延跳过下一根: %s",
+                sorted(stale))
+        return bool(matched)
 
     def _close_on_time_limit(self, current_kline: int):
         """最长持仓到期时按市价平仓，并报告本根发生了退出。"""
@@ -1209,6 +1262,7 @@ class RealtimeStrategyTab(BacktestTab):
 
     def _on_order_update(self, order: dict):
         try:
+            order = self._classify_protection_execution(order)
             values, newly_filled = self._db.upsert_order(order)
             if newly_filled:
                 balance = self._number_from_label(
@@ -1218,8 +1272,12 @@ class RealtimeStrategyTab(BacktestTab):
             if is_close_trade:
                 if values.get("order_id"):
                     self._pending_close_order_ids.add(values["order_id"])
-                if values.get("action_type") in ("TP", "SL"):
-                    self._pending_protection_exit = True
+                    self._pending_close_event_times[values["order_id"]] = \
+                        self._order_event_time_ms(order)
+                # Binance 的 Algo 止损会生成一个新的 MARKET 实际成交单，
+                # 且在部分账户模式下既没有 STOP 类型，也没有 reduceOnly。
+                # 能识别为真实减仓/平仓成交，就必须按退出处理。
+                self._pending_protection_exit = True
                 if newly_filled:
                     get_logger().info(
                         "检测到平仓成交: symbol=%s action=%s order_id=%s "
@@ -1234,6 +1292,31 @@ class RealtimeStrategyTab(BacktestTab):
         except Exception as exc:  # noqa: BLE001
             get_logger().exception("保存订单状态失败")
             self._record_log(tr("db_write_error", err=exc), False)
+
+    def _classify_protection_execution(self, order: dict) -> dict:
+        """关联 Algo 条件单和其生成的实际订单，恢复 TP/SL 语义。"""
+        normalized = dict(order)
+        execution_type = str(normalized.get(
+            "x", normalized.get("executionType", ""))).upper()
+        order_type = str(normalized.get(
+            "o", normalized.get("type", ""))).upper()
+        action = "SL" if "STOP" in order_type else (
+            "TP" if "TAKE_PROFIT" in order_type else None)
+        actual_order_id = normalized.get(
+            "ai", normalized.get("actualOrderId"))
+        if execution_type == "ALGO_UPDATE" and action \
+                and actual_order_id not in (None, "", 0, "0"):
+            actual_key = str(actual_order_id)
+            self._protection_actions_by_order_id[actual_key] = action
+
+        order_id = normalized.get("i", normalized.get("orderId"))
+        linked_action = self._protection_actions_by_order_id.get(str(order_id)) \
+            if order_id not in (None, "") else None
+        effective_action = linked_action or action
+        if effective_action:
+            normalized["action_type"] = effective_action
+            normalized["use_type"] = f"{effective_action}_CLOSE"
+        return normalized
 
     @staticmethod
     def _is_close_trade_event(order: dict, values: dict) -> bool:
@@ -1323,11 +1406,23 @@ class RealtimeStrategyTab(BacktestTab):
         if claimed == 0:
             return
         closed_order_ids = sorted(self._pending_close_order_ids)
+        close_event_times = getattr(self, "_pending_close_event_times", {})
+        exit_event_times = getattr(self, "_exit_event_times_ms", None)
+        matched_times = {
+            close_event_times[order_id] for order_id in closed_order_ids
+            if order_id in close_event_times
+        }
+        if exit_event_times is not None:
+            exit_event_times.update(matched_times)
+        for order_id in closed_order_ids:
+            close_event_times.pop(order_id, None)
         self._pending_close_order_ids.clear()
         self._pending_realized_pnl = 0.0
         self._entry_kline_index = None
         self._entry_time_ms = None
-        if self._pending_protection_exit:
+        # 没有成交时间的旧事件才退回原布尔行为；正常事件由上面的精确
+        # 时间集合决定归属 K 线，避免迟到消息误跳过下一根。
+        if self._pending_protection_exit and not matched_times:
             self._exit_since_last_closed_kline = True
         self._pending_protection_exit = False
         self._update_strategy_capital_label()

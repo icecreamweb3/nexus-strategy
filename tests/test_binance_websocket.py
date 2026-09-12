@@ -72,6 +72,25 @@ class BinanceWebsocketTests(unittest.TestCase):
         self.assertEqual(received, [order])
         self.assertIn("7", monitor.order_status_cache)
 
+    def test_algo_update_forwards_actual_order_id_and_event_time(self):
+        received = []
+        monitor = OrdersMonitor(object(), on_order_update=received.append)
+        payload = {
+            "e": "ALGO_UPDATE", "T": 123456,
+            "o": {
+                "aid": 900, "caid": "sl-900", "ai": 901,
+                "s": "BTCUSDT", "S": "SELL", "ps": "LONG",
+                "o": "STOP_MARKET", "q": "0.01", "tp": "99",
+                "ap": "98.9", "X": "FINISHED", "R": True,
+            },
+        }
+
+        monitor._on_message(None, json.dumps(payload))
+
+        self.assertEqual(received[0]["ai"], 901)
+        self.assertEqual(received[0]["T"], 123456)
+        self.assertTrue(received[0]["R"])
+
     def test_perpetual_price_callback_uses_agg_trade_price(self):
         received = []
         monitor = OrdersMonitor(

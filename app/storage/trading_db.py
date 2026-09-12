@@ -306,6 +306,7 @@ class TradingDatabase:
 
     def upsert_order(self, order: dict) -> tuple[dict, bool]:
         values = self._order_values(order)
+        actual_order_id = order.get("ai", order.get("actualOrderId"))
         if not values["order_id"] or not values["symbol"] or not values["side"]:
             raise ValueError("订单事件缺少 order_id/symbol/side")
         columns = tuple(values)
@@ -334,6 +335,17 @@ class TradingDatabase:
                 f"DO UPDATE SET {updates}",
                 tuple(values[name] for name in columns),
             )
+            # Algo STOP/TP 与触发后生成的实际 MARKET 单使用不同 ID。
+            # 两类事件可能乱序到达；若实际单已存在，在这里补回退出语义。
+            if actual_order_id not in (None, "", 0, "0") \
+                    and values["action_type"] in ("TP", "SL"):
+                connection.execute(
+                    "UPDATE orders SET action_type=?, use_type=?, "
+                    "trade_direction=?, reduce_only=1 WHERE exchange='binance' "
+                    "AND order_id=?",
+                    (values["action_type"], values["use_type"],
+                     values["trade_direction"], str(actual_order_id)),
+                )
         newly_filled = values["status"] == "FILLED" \
             and (previous is None or previous["status"] != "FILLED")
         return values, newly_filled

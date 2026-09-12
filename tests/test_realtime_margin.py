@@ -303,6 +303,80 @@ def test_close_trade_event_ignores_opening_trade():
     )
 
 
+def test_algo_stop_actual_market_order_keeps_sl_classification():
+    tab = SimpleNamespace(_protection_actions_by_order_id={})
+
+    algo = RealtimeStrategyTab._classify_protection_execution(tab, {
+        "i": "900", "ai": "901", "x": "ALGO_UPDATE",
+        "o": "STOP_MARKET", "X": "FINISHED",
+    })
+    actual = RealtimeStrategyTab._classify_protection_execution(tab, {
+        "i": "901", "x": "TRADE", "o": "MARKET", "X": "FILLED",
+    })
+
+    assert algo["action_type"] == "SL"
+    assert actual["action_type"] == "SL"
+    assert actual["use_type"] == "SL_CLOSE"
+
+
+def test_exit_event_time_matches_only_its_own_kline():
+    previous = SimpleNamespace(index=40, open_time=0)
+    current = SimpleNamespace(index=41, open_time=60_000)
+    tab = SimpleNamespace(
+        _exit_event_times_ms={30_000, 90_000},
+        _processor=SimpleNamespace(klines=[previous, current]),
+    )
+
+    assert RealtimeStrategyTab._consume_exit_for_kline(tab, current)
+    assert tab._exit_event_times_ms == set()
+
+    following = SimpleNamespace(index=42, open_time=120_000)
+    tab._processor.klines.append(following)
+    assert not RealtimeStrategyTab._consume_exit_for_kline(tab, following)
+
+
+def test_closed_kline_skips_signal_when_order_event_is_late_but_position_is_flat():
+    evaluated = []
+    placed = []
+    previous = SimpleNamespace(index=40, open_time=0)
+    order = SimpleNamespace(
+        exit_bar_signal_enabled=False, max_hold_klines=0)
+
+    class Processor:
+        def __init__(self):
+            self.order = order
+            self.klines = [previous]
+
+        def add_closed_kline(self, kline, evaluate=False):
+            kline.index = 41
+            self.klines.append(kline)
+
+        def evaluate_latest_closed(self):
+            evaluated.append(True)
+            return object()
+
+    tab = SimpleNamespace(
+        _running=True,
+        _processor=Processor(),
+        _gateway=SimpleNamespace(client=SimpleNamespace(
+            has_open_position=lambda _symbol: False)),
+        _entry_kline_index=41,
+        _exit_since_last_closed_kline=False,
+        _exit_event_times_ms=set(),
+        cmb_symbol=SimpleNamespace(currentText=lambda: "BTCUSDT"),
+        _close_on_time_limit=lambda _index: False,
+        _consume_exit_for_kline=lambda _kline: False,
+        _place_signal_order=placed.append,
+    )
+    kline = SimpleNamespace(
+        index=0, open_time=60_000, close=100.0)
+
+    RealtimeStrategyTab._on_closed_kline(tab, kline)
+
+    assert evaluated == []
+    assert placed == []
+
+
 def test_zero_pnl_protection_exit_still_marks_exit_kline():
     canceled = []
     refreshed = []

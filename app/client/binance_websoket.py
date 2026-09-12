@@ -751,6 +751,9 @@ class OrdersMonitor:
             if isinstance(data, dict) and data.get('e') == 'ORDER_TRADE_UPDATE':
                 order_data = data.get('o', {})
                 if order_data:
+                    # 子订单通常自带成交时间；保留外层事件时间作为兜底，供
+                    # 上层把平仓成交准确映射到所在 K 线。
+                    order_data.setdefault('T', data.get('T', data.get('E')))
                     # ✅ 添加 INFO 级别日志，方便用户查看
                     order_id = str(order_data.get('i', ''))
                     order_status = order_data.get('X', '')
@@ -760,6 +763,8 @@ class OrdersMonitor:
             elif isinstance(data, dict) and data.get('e') == 'ALGO_UPDATE':
                 algo_order_data = data.get('o', {})
                 if algo_order_data:
+                    algo_order_data.setdefault(
+                        'T', data.get('T', data.get('E')))
                     # ✅ 添加 INFO 级别日志，方便用户查看
                     algo_id = algo_order_data.get('aid')
                     algo_status = algo_order_data.get('X', '')
@@ -924,11 +929,15 @@ class OrdersMonitor:
                 try:
                     self.on_order_update_callback({
                         'i': algo_id, 'aid': algo_id, 'caid': client_algo_id,
+                        'ai': actual_order_id,
                         's': symbol, 'S': algo_order_data.get('S', ''),
                         'ps': algo_order_data.get('ps', 'BOTH'),
                         'o': order_type, 'q': str(quantity),
                         'p': str(trigger_price), 'sp': str(trigger_price),
                         'ap': str(actual_price), 'X': algo_status,
+                        'R': algo_order_data.get('R', False),
+                        'cp': algo_order_data.get('cp', False),
+                        'T': algo_order_data.get('T'),
                         'x': 'ALGO_UPDATE',
                     })
                 except Exception as exc:
