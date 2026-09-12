@@ -319,6 +319,61 @@ def test_algo_stop_actual_market_order_keeps_sl_classification():
     assert actual["use_type"] == "SL_CLOSE"
 
 
+def test_protection_trigger_log_contains_order_and_price_details():
+    messages = []
+    tab = SimpleNamespace(
+        _logged_protection_trigger_ids=set(),
+        _record_log=lambda message, _triggered: messages.append(message),
+        _format_local_time=RealtimeStrategyTab._format_local_time,
+        _order_event_time_ms=RealtimeStrategyTab._order_event_time_ms,
+    )
+    order = {
+        "x": "ALGO_UPDATE", "X": "FINISHED", "ai": "901", "T": 90_000,
+    }
+    values = {
+        "action_type": "SL", "symbol": "BTCUSDT", "algo_id": "900",
+        "order_id": "900", "stop_price": 99, "filled_price": 98.9,
+        "quantity": 0.01,
+    }
+
+    RealtimeStrategyTab._log_protection_trigger(tab, order, values)
+    RealtimeStrategyTab._log_protection_trigger(tab, order, values)
+
+    assert len(messages) == 1
+    assert "SL" in messages[0]
+    assert "900" in messages[0]
+    assert "901" in messages[0]
+    assert "98.9" in messages[0]
+
+
+def test_exit_fill_log_contains_pnl_fee_and_exit_kline():
+    messages = []
+    tab = SimpleNamespace(
+        klines=[
+            SimpleNamespace(index=40, open_time=0),
+            SimpleNamespace(index=41, open_time=60_000),
+        ],
+        _record_log=lambda message, _triggered: messages.append(message),
+        _format_local_time=RealtimeStrategyTab._format_local_time,
+        _order_event_time_ms=RealtimeStrategyTab._order_event_time_ms,
+        _kline_index_for_event_time=
+            RealtimeStrategyTab._kline_index_for_event_time,
+    )
+    order = {"x": "TRADE", "T": 90_000}
+    values = {
+        "action_type": "SL", "symbol": "BTCUSDT", "order_id": "901",
+        "filled_price": 98.9, "filled_quantity": 0.01,
+        "realized_pnl": -1.1, "commission_value": 0.03,
+        "commission_asset": "USDT",
+    }
+
+    RealtimeStrategyTab._log_exit_fill(tab, order, values)
+
+    assert len(messages) == 1
+    assert all(value in messages[0] for value in (
+        "SL", "901", "98.9", "-1.1", "0.03", "USDT", "#41"))
+
+
 def test_exit_event_time_matches_only_its_own_kline():
     previous = SimpleNamespace(index=40, open_time=0)
     current = SimpleNamespace(index=41, open_time=60_000)
@@ -367,6 +422,7 @@ def test_closed_kline_skips_signal_when_order_event_is_late_but_position_is_flat
         _close_on_time_limit=lambda _index: False,
         _consume_exit_for_kline=lambda _kline: False,
         _place_signal_order=placed.append,
+        _record_log=lambda _message, _triggered: None,
     )
     kline = SimpleNamespace(
         index=0, open_time=60_000, close=100.0)

@@ -56,6 +56,7 @@ class RealtimeStrategyTab(BacktestTab):
         self._protection_actions_by_order_id = {}
         self._pending_close_event_times = {}
         self._exit_event_times_ms = set()
+        self._logged_protection_trigger_ids = set()
         self._latest_close = None
         self._live_prices = {}
         self._current_position_rows = []
@@ -442,6 +443,7 @@ class RealtimeStrategyTab(BacktestTab):
             self._protection_actions_by_order_id.clear()
             self._pending_close_event_times.clear()
             self._exit_event_times_ms.clear()
+            self._logged_protection_trigger_ids.clear()
             self._update_strategy_capital_label()
             self._log_lines.clear()
             self._page = 0
@@ -540,6 +542,7 @@ class RealtimeStrategyTab(BacktestTab):
         self._protection_actions_by_order_id.clear()
         self._pending_close_event_times.clear()
         self._exit_event_times_ms.clear()
+        self._logged_protection_trigger_ids.clear()
         self._update_strategy_capital_label()
         self._close_live_log()
         self.cmb_symbol.setEnabled(True)
@@ -686,6 +689,9 @@ class RealtimeStrategyTab(BacktestTab):
                     get_logger().info(
                         "K线收盘前已确认 %s 空仓，将 K线 #%s 标记为退出K线",
                         symbol, kline.index)
+        if not self._processor.order.exit_bar_signal_enabled and exited:
+            self._record_log(tr(
+                "realtime_exit_bar_skipped", kline=kline.index), True)
         signal = None
         if self._processor.order.exit_bar_signal_enabled or not exited:
             signal = self._processor.evaluate_latest_closed()
@@ -1006,8 +1012,11 @@ class RealtimeStrategyTab(BacktestTab):
                 self._record_log(tr(
                     "realtime_protection_sent", symbol=symbol,
                     entry=f"{avg_price:.2f}",
+                    quantity=f"{quantity:g}",
                     tp=f"{float(tp_price):.2f}" if tp_price is not None else "Disabled",
-                    sl=f"{float(sl_price):.2f}" if sl_price is not None else "Disabled"), True)
+                    sl=f"{float(sl_price):.2f}" if sl_price is not None else "Disabled",
+                    tp_order_id=update.get("take_profit_order_id") or "-",
+                    sl_order_id=update.get("stop_loss_order_id") or "-"), True)
             self._refresh_record_tables()
         except Exception as exc:  # noqa: BLE001
             get_logger().exception("保存 TP/SL 保护单失败")
@@ -1264,6 +1273,7 @@ class RealtimeStrategyTab(BacktestTab):
         try:
             order = self._classify_protection_execution(order)
             values, newly_filled = self._db.upsert_order(order)
+            self._log_protection_trigger(order, values)
             if newly_filled:
                 balance = self._number_from_label(
                     self.lbl_balance_value.text())
@@ -1279,6 +1289,7 @@ class RealtimeStrategyTab(BacktestTab):
                 # 能识别为真实减仓/平仓成交，就必须按退出处理。
                 self._pending_protection_exit = True
                 if newly_filled:
+                    self._log_exit_fill(order, values)
                     get_logger().info(
                         "检测到平仓成交: symbol=%s action=%s order_id=%s "
                         "side=%s quantity=%s avg_price=%s realized_pnl=%s",
@@ -1317,6 +1328,84 @@ class RealtimeStrategyTab(BacktestTab):
             normalized["action_type"] = effective_action
             normalized["use_type"] = f"{effective_action}_CLOSE"
         return normalized
+
+    def _log_protection_trigger(self, order: dict, values: dict) -> None:
+        """记录 Algo TP/SL 从条件触发到生成实际订单的详细信息。"""
+        execution_type = str(order.get(
+            "x", order.get("executionType", ""))).upper()
+        status = str(order.get("X", order.get("status", ""))).upper()
+        action = str(values.get("action_type", "")).upper()
+        actual_order_id = order.get("ai", order.get("actualOrderId"))
+        if execution_type != "ALGO_UPDATE" or status != "FINISHED" \
+                or action not in ("TP", "SL") \
+                or actual_order_id in (None, "", 0, "0"):
+            return
+        trigger_id = str(values.get("algo_id") or values.get("order_id"))
+        logged_ids = getattr(self, "_logged_protection_trigger_ids", None)
+        if logged_ids is None:
+            logged_ids = set()
+            self._logged_protection_trigger_ids = logged_ids
+        if trigger_id in logged_ids:
+            return
+        logged_ids.add(trigger_id)
+        event_time = self._order_event_time_ms(order)
+        trigger_price = values.get("stop_price") or values.get("price") or 0
+        fill_price = values.get("filled_price") or values.get("avg_price") or 0
+        message = tr(
+            "realtime_protection_triggered",
+            exit_type=action,
+            symbol=values.get("symbol") or "-",
+            algo_id=trigger_id,
+            actual_order_id=actual_order_id,
+            trigger_price=f"{float(trigger_price):g}" if trigger_price else "-",
+            fill_price=f"{float(fill_price):g}" if fill_price else "-",
+            quantity=f"{float(values.get('quantity') or 0):g}",
+            time=self._format_local_time(event_time),
+        )
+        self._record_log(message, True)
+        get_logger().info(
+            "保护条件单已触发: type=%s symbol=%s algo_id=%s "
+            "actual_order_id=%s trigger_price=%s fill_price=%s quantity=%s "
+            "event_time_ms=%s",
+            action, values.get("symbol"), trigger_id, actual_order_id,
+            trigger_price, fill_price, values.get("quantity"), event_time)
+
+    def _log_exit_fill(self, order: dict, values: dict) -> None:
+        """记录 TP/SL/其他退出的实际成交、盈亏及手续费。"""
+        action = str(values.get("action_type", "")).upper()
+        exit_type = action if action in ("TP", "SL") else "EXIT"
+        event_time = self._order_event_time_ms(order)
+        price = values.get("filled_price") or values.get("avg_price") \
+            or values.get("price") or 0
+        quantity = values.get("filled_quantity") or values.get("filled_qty") \
+            or values.get("quantity") or 0
+        pnl = float(values.get("realized_pnl") or 0)
+        fee = float(values.get("commission_value")
+                    if values.get("commission_value") is not None
+                    else values.get("commission") or 0)
+        fee_asset = values.get("commission_asset") or "-"
+        kline_index = self._kline_index_for_event_time(
+            getattr(self, "klines", []), event_time)
+        message = tr(
+            "realtime_exit_filled",
+            exit_type=exit_type,
+            symbol=values.get("symbol") or "-",
+            order_id=values.get("order_id") or "-",
+            price=f"{float(price):g}",
+            quantity=f"{float(quantity):g}",
+            pnl=f"{pnl:+g}",
+            fee=f"{fee:g}",
+            fee_asset=fee_asset,
+            kline=kline_index if kline_index is not None else "-",
+            time=self._format_local_time(event_time),
+        )
+        self._record_log(message, True)
+        get_logger().info(
+            "退出成交明细: type=%s symbol=%s order_id=%s price=%s "
+            "quantity=%s realized_pnl=%s fee=%s fee_asset=%s "
+            "exit_kline=%s event_time_ms=%s",
+            exit_type, values.get("symbol"), values.get("order_id"), price,
+            quantity, pnl, fee, fee_asset, kline_index, event_time)
 
     @staticmethod
     def _is_close_trade_event(order: dict, values: dict) -> bool:
@@ -1481,6 +1570,23 @@ class RealtimeStrategyTab(BacktestTab):
                     return kline.index - missing
                 return kline.index
         return klines[-1].index + 1
+
+    @staticmethod
+    def _kline_index_for_event_time(klines, timestamp_ms) -> int | None:
+        """把盘中成交时间映射到其所在 K 线，而不是下一根开仓 K 线。"""
+        if not klines or timestamp_ms in (None, ""):
+            return None
+        target = int(timestamp_ms)
+        keys = [LiveSignalProcessor._time_key(kline) for kline in klines]
+        if len(keys) >= 2:
+            step = max(keys[-1] - keys[-2], 1)
+        else:
+            step = 60_000
+        if target < keys[0]:
+            missing = (keys[0] - target + step - 1) // step
+            return klines[0].index - missing
+        offset = (target - keys[-1]) // step
+        return klines[-1].index + offset
 
     def _persist_live_session(self) -> None:
         if not self._running or self._strategy_capital is None \
