@@ -358,6 +358,7 @@ def test_exit_fill_log_contains_pnl_fee_and_exit_kline():
         _order_event_time_ms=RealtimeStrategyTab._order_event_time_ms,
         _kline_index_for_event_time=
             RealtimeStrategyTab._kline_index_for_event_time,
+        _time_close_kline_by_order_id={},
     )
     order = {"x": "TRADE", "T": 90_000}
     values = {
@@ -372,6 +373,61 @@ def test_exit_fill_log_contains_pnl_fee_and_exit_kline():
     assert len(messages) == 1
     assert all(value in messages[0] for value in (
         "SL", "901", "98.9", "-1.1", "0.03", "USDT", "#41"))
+
+
+def test_time_exit_fill_uses_trigger_kline_instead_of_fill_time_kline():
+    messages = []
+    tab = SimpleNamespace(
+        klines=[
+            SimpleNamespace(index=1421, open_time=0),
+            SimpleNamespace(index=1422, open_time=60_000),
+        ],
+        _time_close_kline_by_order_id={"901": 1421},
+        _record_log=lambda message, _triggered: messages.append(message),
+        _format_local_time=RealtimeStrategyTab._format_local_time,
+        _order_event_time_ms=RealtimeStrategyTab._order_event_time_ms,
+        _kline_index_for_event_time=
+            RealtimeStrategyTab._kline_index_for_event_time,
+    )
+    order = {"x": "TRADE", "T": 90_000}
+    values = {
+        "action_type": "EXIT", "symbol": "BTCUSDT", "order_id": "901",
+        "filled_price": 100, "filled_quantity": 0.01,
+        "realized_pnl": 1, "commission_value": 0.01,
+        "commission_asset": "USDT",
+    }
+
+    RealtimeStrategyTab._log_exit_fill(tab, order, values)
+
+    assert "#1421" in messages[0]
+
+
+def test_time_exit_order_does_not_mark_following_kline_as_exit_bar():
+    tab = SimpleNamespace(
+        _db=SimpleNamespace(upsert_order=lambda _order: ({
+            "order_id": "901", "reduce_only": 1,
+        }, False)),
+        _protection_actions_by_order_id={},
+        _time_close_kline_by_order_id={"901": 1421},
+        _pending_close_order_ids=set(),
+        _pending_close_event_times={},
+        _pending_protection_exit=False,
+        _classify_protection_execution=lambda order: order,
+        _log_protection_trigger=lambda *_args: None,
+        _is_close_trade_event=RealtimeStrategyTab._is_close_trade_event,
+        _order_event_time_ms=RealtimeStrategyTab._order_event_time_ms,
+        _apply_realized_pnl_if_position_closed=lambda _order: None,
+        _refresh_record_tables=lambda: None,
+        _record_log=lambda *_args: None,
+    )
+
+    RealtimeStrategyTab._on_order_update(tab, {
+        "i": "901", "x": "TRADE", "T": 90_000,
+    })
+
+    assert tab._pending_close_order_ids == {"901"}
+    assert tab._pending_close_event_times == {}
+    assert tab._pending_protection_exit is False
 
 
 def test_exit_event_time_matches_only_its_own_kline():

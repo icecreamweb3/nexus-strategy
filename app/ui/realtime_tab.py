@@ -56,6 +56,9 @@ class RealtimeStrategyTab(BacktestTab):
         self._protection_actions_by_order_id = {}
         self._pending_close_event_times = {}
         self._exit_event_times_ms = set()
+        # TIME 在已收盘 K 线回调中触发，但市价单通常到下一根 K 线才成交。
+        # 保留触发 K 线归属，避免按成交时间把下一根误判为退出 K 线。
+        self._time_close_kline_by_order_id = {}
         self._logged_protection_trigger_ids = set()
         self._latest_close = None
         self._live_prices = {}
@@ -443,6 +446,7 @@ class RealtimeStrategyTab(BacktestTab):
             self._protection_actions_by_order_id.clear()
             self._pending_close_event_times.clear()
             self._exit_event_times_ms.clear()
+            self._time_close_kline_by_order_id.clear()
             self._logged_protection_trigger_ids.clear()
             self._update_strategy_capital_label()
             self._log_lines.clear()
@@ -542,6 +546,7 @@ class RealtimeStrategyTab(BacktestTab):
         self._protection_actions_by_order_id.clear()
         self._pending_close_event_times.clear()
         self._exit_event_times_ms.clear()
+        self._time_close_kline_by_order_id.clear()
         self._logged_protection_trigger_ids.clear()
         self._update_strategy_capital_label()
         self._close_live_log()
@@ -756,11 +761,14 @@ class RealtimeStrategyTab(BacktestTab):
                         "error_message", "TIME 市价平仓失败"))
                 order_id = result.get("orderId")
                 if order_id is not None:
-                    self._pending_close_order_ids.add(str(order_id))
-                    final_order = client.get_order_status(symbol, str(order_id))
+                    order_id = str(order_id)
+                    self._time_close_kline_by_order_id[order_id] = \
+                        current_kline
+                    self._pending_close_order_ids.add(order_id)
+                    final_order = client.get_order_status(symbol, order_id)
                     result = final_order or result
-                    for fill in client.get_trade_fills(symbol, str(order_id)):
-                        fill_key = (str(order_id), str(fill.get("id")))
+                    for fill in client.get_trade_fills(symbol, order_id):
+                        fill_key = (order_id, str(fill.get("id")))
                         if fill_key in self._processed_trade_ids:
                             continue
                         self._processed_trade_ids.add(fill_key)
@@ -1281,13 +1289,19 @@ class RealtimeStrategyTab(BacktestTab):
             is_close_trade = self._is_close_trade_event(order, values)
             if is_close_trade:
                 if values.get("order_id"):
-                    self._pending_close_order_ids.add(values["order_id"])
-                    self._pending_close_event_times[values["order_id"]] = \
-                        self._order_event_time_ms(order)
+                    order_id = str(values["order_id"])
+                    self._pending_close_order_ids.add(order_id)
+                    # TIME 已由触发它的收盘回调标记退出 K 线。其成交可能在
+                    # 下一根开盘后才返回，不能再按成交时间生成第二个退出标记。
+                    if order_id not in self._time_close_kline_by_order_id:
+                        self._pending_close_event_times[order_id] = \
+                            self._order_event_time_ms(order)
                 # Binance 的 Algo 止损会生成一个新的 MARKET 实际成交单，
                 # 且在部分账户模式下既没有 STOP 类型，也没有 reduceOnly。
                 # 能识别为真实减仓/平仓成交，就必须按退出处理。
-                self._pending_protection_exit = True
+                if not values.get("order_id") or str(values["order_id"]) \
+                        not in self._time_close_kline_by_order_id:
+                    self._pending_protection_exit = True
                 if newly_filled:
                     self._log_exit_fill(order, values)
                     get_logger().info(
@@ -1384,8 +1398,11 @@ class RealtimeStrategyTab(BacktestTab):
                     if values.get("commission_value") is not None
                     else values.get("commission") or 0)
         fee_asset = values.get("commission_asset") or "-"
-        kline_index = self._kline_index_for_event_time(
-            getattr(self, "klines", []), event_time)
+        order_id = str(values.get("order_id") or "")
+        kline_index = self._time_close_kline_by_order_id.get(order_id)
+        if kline_index is None:
+            kline_index = self._kline_index_for_event_time(
+                getattr(self, "klines", []), event_time)
         message = tr(
             "realtime_exit_filled",
             exit_type=exit_type,
