@@ -480,6 +480,9 @@ def test_closed_kline_skips_signal_when_order_event_is_late_but_position_is_flat
         _place_signal_order=placed.append,
         _record_log=lambda _message, _triggered: None,
     )
+    def recover_flat(_symbol, **_kwargs):
+        tab._entry_kline_index = None
+    tab._recover_missed_flat_position = recover_flat
     kline = SimpleNamespace(
         index=0, open_time=60_000, close=100.0)
 
@@ -487,6 +490,67 @@ def test_closed_kline_skips_signal_when_order_event_is_late_but_position_is_flat
 
     assert evaluated == []
     assert placed == []
+    assert tab._entry_kline_index is None
+
+    following = SimpleNamespace(
+        index=0, open_time=120_000, close=101.0)
+    RealtimeStrategyTab._on_closed_kline(tab, following)
+
+    assert len(evaluated) == 1
+    assert len(placed) == 1
+
+
+def test_recovered_flat_position_uses_rest_trade_time_and_clears_entry_state():
+    synced_positions = []
+    canceled = []
+    persisted = []
+    messages = []
+    trades = [
+        {"symbol": "BTCUSDT", "time": 1000, "orderId": 10},
+        {"symbol": "BTCUSDT", "time": 2500, "orderId": 11,
+         "realizedPnl": "-4.5"},
+    ]
+    client = SimpleNamespace(
+        get_user_trades=lambda **_kwargs: trades,
+        cancel_all_open_orders=lambda symbol: canceled.append(symbol) or {},
+    )
+    database = SimpleNamespace(
+        sync_user_trades=lambda values: len(values),
+        sync_positions=lambda values, symbols: synced_positions.append(
+            (values, symbols)),
+        claim_unapplied_session_pnl=lambda _symbol, _started: (-4.8, 1),
+    )
+    tab = SimpleNamespace(
+        _gateway=SimpleNamespace(client=client),
+        _db=database,
+        _entry_time_ms=1000,
+        _entry_kline_index=41,
+        _session_started_at="2026-09-17T00:00:00+00:00",
+        _pending_realized_pnl=-4.5,
+        _pending_close_order_ids={"old"},
+        _pending_close_event_times={"old": 1},
+        _pending_protection_exit=True,
+        _exit_event_times_ms=set(),
+        _exit_since_last_closed_kline=False,
+        _strategy_capital=910.0,
+        _refresh_balances=lambda **_kwargs: True,
+        _persist_live_session=lambda: persisted.append(True),
+        _record_log=lambda message, _triggered: messages.append(message),
+        _refresh_record_tables=lambda: None,
+    )
+
+    RealtimeStrategyTab._recover_missed_flat_position(
+        tab, "BTCUSDT", mark_exit_for_next_closed_kline=True)
+
+    assert tab._entry_kline_index is None
+    assert tab._entry_time_ms is None
+    assert tab._pending_close_order_ids == set()
+    assert tab._pending_close_event_times == {}
+    assert tab._exit_event_times_ms == {2500}
+    assert synced_positions == [([], ("BTCUSDT",))]
+    assert canceled == ["BTCUSDT"]
+    assert persisted == [True]
+    assert messages
 
 
 def test_zero_pnl_protection_exit_still_marks_exit_kline():

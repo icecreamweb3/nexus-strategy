@@ -123,6 +123,24 @@ class BinanceWebsocketTests(unittest.TestCase):
         self.assertFalse(monitor.running)
         self.assertIn("proxy unavailable", monitor.last_start_error)
 
+    def test_pong_counts_as_user_stream_health_activity(self):
+        monitor = OrdersMonitor(object())
+        monitor.last_pong_time = None
+
+        monitor._on_pong(None, b"pong")
+
+        self.assertIsNotNone(monitor.last_pong_time)
+
+    def test_reconnect_callback_runs_only_after_first_connection(self):
+        recovered = []
+        monitor = OrdersMonitor(
+            object(), on_user_stream_reconnected=lambda: recovered.append(True))
+
+        monitor._on_open(None)
+        monitor._on_open(None)
+
+        self.assertEqual(recovered, [True])
+
     def test_filled_market_order_submits_percentage_tp_and_sl(self):
         class Client:
             def place_stop_loss_order(self, **kwargs):

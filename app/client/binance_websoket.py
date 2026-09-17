@@ -103,7 +103,9 @@ class OrdersMonitor:
                  interval: str = None,
                  on_kline_closed: Optional[Callable[[dict], None]] = None,
                  on_order_update: Optional[Callable[[dict], None]] = None,
-                 testnet: bool = False):
+                 testnet: bool = False,
+                 on_user_stream_reconnected: Optional[
+                     Callable[[], None]] = None):
         """
         初始化订单监控管理器
         
@@ -117,6 +119,7 @@ class OrdersMonitor:
         self.binance_client = binance_client
         self.on_order_filled_callback = on_order_filled_callback
         self.on_order_update_callback = on_order_update
+        self.on_user_stream_reconnected = on_user_stream_reconnected
         self.live_trading_manager = live_trading_manager  # ✅ 添加 live_trading_manager 引用
 
         # 已收盘 K 线订阅（实时策略使用）
@@ -185,8 +188,10 @@ class OrdersMonitor:
         self.max_reconnect_attempts = 10
         self.reconnecting = False
         self.last_pong_time = None
-        # ✅ 连接健康检查：如果超过此时间（秒）没有收到任何websocket消息，触发重连
-        self.connection_timeout = 5 * 60  # 5分钟（保守设置，如果5分钟没收到任何消息就认为连接有问题）
+        self._user_stream_open_count = 0
+        # 连接健康检查使用传输层 PONG/消息活动，不能把“没有订单事件”
+        # 当成断线。安静账户长时间没有业务消息是正常状态。
+        self.connection_timeout = 5 * 60
         # WebSocket PING/PONG 配置（用于快速检测连接状态）
         self.ping_interval = 20  # 每20秒发送一次PING帧
         self.ping_timeout = 10  # PONG响应超时10秒
@@ -426,7 +431,8 @@ class OrdersMonitor:
             on_message=self._on_message,
             on_error=self._on_error,
             on_close=self._on_close,
-            on_open=self._on_open
+            on_open=self._on_open,
+            on_pong=self._on_pong,
         )
         
         # 启动WebSocket线程
@@ -1737,7 +1743,18 @@ class OrdersMonitor:
         # ✅ 成功连接后重置重连计数器
         if self.reconnect_count > 0:
             logger.info(f"✅ WebSocket重连成功 (之前尝试了 {self.reconnect_count} 次)")
+        reconnected = self._user_stream_open_count > 0
+        self._user_stream_open_count += 1
         self.reconnect_count = 0
+        if reconnected and self.on_user_stream_reconnected:
+            try:
+                self.on_user_stream_reconnected()
+            except Exception as exc:
+                logger.warning(f"User Data Stream重连校准回调异常: {exc}")
+
+    def _on_pong(self, _ws, _payload):
+        """PONG 证明传输连接仍然存活，刷新健康检查时间。"""
+        self.last_pong_time = datetime.now()
     
     def _run_websocket(self):
         """运行WebSocket连接"""
@@ -1799,7 +1816,8 @@ class OrdersMonitor:
                                 on_message=self._on_message,
                                 on_error=self._on_error,
                                 on_close=self._on_close,
-                                on_open=self._on_open
+                                on_open=self._on_open,
+                                on_pong=self._on_pong,
                             )
                             self.reconnecting = False
                             logger.info("✅ WebSocket重新连接准备就绪")
@@ -1924,10 +1942,8 @@ class OrdersMonitor:
         连接健康检查循环
         
         定期检查：
-        1. 是否长时间未收到任何WebSocket消息（包括ORDER_TRADE_UPDATE、ALGO_UPDATE等实际业务消息）
-        2. 如果超过 connection_timeout 时间未收到消息，触发重连
-        
-        注意：ping/pong是底层WebSocket协议的keepalive机制，不算作业务消息
+        1. 是否长时间未收到 PONG 或任何 WebSocket 消息
+        2. 如果超过 connection_timeout 时间没有传输层活动，触发重连
         """
         check_interval = 60  # 每60秒检查一次
         
@@ -1938,20 +1954,20 @@ class OrdersMonitor:
                 if not self.running:
                     break
                 
-                # 检查最后一次收到消息的时间
+                # PONG 和业务消息都会刷新该时间。业务静默不再被误判为断线。
                 if self.last_pong_time:
                     elapsed_seconds = (datetime.now() - self.last_pong_time).total_seconds()
                     
                     # 如果超过阈值时间没有收到任何消息，触发重连
                     if elapsed_seconds > self.connection_timeout:
                         logger.warning(
-                            f"⚠️ User Data Stream连接可能失效：已{elapsed_seconds:.1f}秒未收到任何消息 "
+                            f"⚠️ User Data Stream连接可能失效：已{elapsed_seconds:.1f}秒无传输活动 "
                             f"(超时阈值: {self.connection_timeout}秒)，触发重连..."
                         )
                         self._reconnect()
                     else:
                         logger.debug(
-                            f"💚 User Data Stream连接健康检查通过：最后收到消息时间 {elapsed_seconds:.1f}秒前"
+                            f"💚 User Data Stream连接健康检查通过：最后传输活动 {elapsed_seconds:.1f}秒前"
                         )
                 else:
                     logger.debug("💚 User Data Stream连接健康检查：尚未收到第一条消息")

@@ -15,6 +15,7 @@ class KlineStream(QObject):
     protection_update = pyqtSignal(dict)
     connected = pyqtSignal()
     disconnected = pyqtSignal()
+    reconnected = pyqtSignal()
     failed = pyqtSignal(str)
 
     def __init__(self, binance_client, symbol: str, interval: str,
@@ -40,6 +41,7 @@ class KlineStream(QObject):
             interval=self.interval,
             on_kline_closed=self._on_kline_closed,
             on_order_update=self.order_update.emit,
+            on_user_stream_reconnected=self.reconnected.emit,
             testnet=self.testnet,
         )
         self._monitor = monitor

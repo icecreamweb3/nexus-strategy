@@ -421,6 +421,7 @@ class RealtimeStrategyTab(BacktestTab):
             stream.closed_kline.connect(self._on_closed_kline)
             stream.order_update.connect(self._on_order_update)
             stream.protection_update.connect(self._on_protection_update)
+            stream.reconnected.connect(self._on_user_stream_reconnected)
             stream.failed.connect(self._on_stream_error)
 
             self._gateway = gateway
@@ -694,6 +695,11 @@ class RealtimeStrategyTab(BacktestTab):
                     get_logger().info(
                         "K线收盘前已确认 %s 空仓，将 K线 #%s 标记为退出K线",
                         symbol, kline.index)
+                    # WebSocket 成交事件可能恰好落在断线窗口内。交易所已经
+                    # 明确返回空仓时，必须结束本地持仓状态；否则后续每根 K 线
+                    # 都会再次被误判为退出 K 线。
+                    self._recover_missed_flat_position(
+                        symbol, mark_exit_for_next_closed_kline=False)
         if not self._processor.order.exit_bar_signal_enabled and exited:
             self._record_log(tr(
                 "realtime_exit_bar_skipped", kline=kline.index), True)
@@ -702,6 +708,83 @@ class RealtimeStrategyTab(BacktestTab):
             signal = self._processor.evaluate_latest_closed()
         if signal is not None:
             self._place_signal_order(signal)
+
+    def _on_user_stream_reconnected(self) -> None:
+        """User Data Stream 重连后补拉断线窗口内可能遗漏的成交。"""
+        if not self._running or self._gateway is None:
+            return
+        symbol = self.cmb_symbol.currentText().strip().upper()
+        tracked_position = self._entry_kline_index is not None
+        get_logger().info("User Data Stream已重连，开始校准账户状态: %s", symbol)
+        if not self._refresh_account(show_errors=False, sync_history=True):
+            get_logger().warning("User Data Stream重连后账户校准失败: %s", symbol)
+            return
+        has_position = self._gateway.client.has_open_position(symbol)
+        if tracked_position and has_position is False:
+            self._recover_missed_flat_position(
+                symbol, mark_exit_for_next_closed_kline=True)
+
+    def _recover_missed_flat_position(
+            self, symbol: str, *, mark_exit_for_next_closed_kline: bool) -> None:
+        """补偿未收到成交推送、但交易所已经确认空仓的退出。"""
+        client = self._gateway.client
+        exit_time_ms = None
+        try:
+            trades = client.get_user_trades(
+                symbol=symbol, limit=1000, raise_on_error=True) or []
+            self._db.sync_user_trades(trades)
+            entry_time_ms = self._entry_time_ms
+            candidates = []
+            for trade in trades:
+                try:
+                    event_time = int(float(trade.get("time") or 0))
+                except (TypeError, ValueError):
+                    continue
+                if event_time <= 0 or (entry_time_ms is not None
+                                       and event_time <= entry_time_ms):
+                    continue
+                candidates.append(event_time)
+            if candidates:
+                exit_time_ms = max(candidates)
+            self._db.sync_positions([], symbols=(symbol,))
+        except Exception as exc:  # noqa: BLE001
+            # 即使成交明细暂时拉取失败，也必须结束已经由交易所确认为空仓的
+            # 本地状态，避免永久停止信号判断。后续手工/启动同步仍可补全历史。
+            get_logger().warning("补拉 %s 遗漏退出成交失败: %s", symbol, exc)
+
+        self._refresh_balances(show_errors=False, client=client)
+        pnl = 0.0
+        claimed = 0
+        if self._session_started_at:
+            try:
+                pnl, claimed = self._db.claim_unapplied_session_pnl(
+                    symbol, self._session_started_at)
+            except Exception as exc:  # noqa: BLE001
+                get_logger().warning("领取 %s 遗漏退出盈亏失败: %s", symbol, exc)
+
+        self._entry_kline_index = None
+        self._entry_time_ms = None
+        self._pending_realized_pnl = 0.0
+        self._pending_close_order_ids.clear()
+        self._pending_close_event_times.clear()
+        self._pending_protection_exit = False
+        if mark_exit_for_next_closed_kline:
+            if exit_time_ms is not None:
+                self._exit_event_times_ms.add(exit_time_ms)
+            else:
+                self._exit_since_last_closed_kline = True
+        self._persist_live_session()
+        cancel_summary = client.cancel_all_open_orders(symbol) or {}
+        get_logger().warning(
+            "已从REST恢复遗漏退出: symbol=%s event_time_ms=%s pnl=%s "
+            "claimed=%s cancel_failed=%d",
+            symbol, exit_time_ms, pnl, claimed,
+            len(cancel_summary.get("failed", [])))
+        if claimed:
+            self._record_log(tr(
+                "realtime_strategy_capital_updated", pnl=f"{pnl:+.2f}",
+                capital=f"{self._strategy_capital:.2f}"), True)
+        self._refresh_record_tables()
 
     def _consume_exit_for_kline(self, kline) -> bool:
         """按成交时间消费属于当前 K 线的退出事件，不把迟到事件挪到下一根。"""
