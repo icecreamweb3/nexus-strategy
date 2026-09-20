@@ -79,6 +79,26 @@ def test_mode_setters_do_not_send_changes_while_positions_exist():
     assert calls == []
 
 
+def test_position_mode_read_uses_last_confirmed_value_on_transient_failure():
+    class RawClient:
+        reads = 0
+
+        @classmethod
+        def futures_get_position_mode(cls):
+            cls.reads += 1
+            if cls.reads == 1:
+                return {"dualSidePosition": False}
+            raise ConnectionError("temporary failure")
+
+    client = object.__new__(BinanceClient)
+    client.client = RawClient()
+    client._position_mode_cache = None
+    client.set_timestamp_offset = lambda **_kwargs: None
+
+    assert client.get_position_mode() is False
+    assert client.get_position_mode() is False
+
+
 def test_spot_account_info_uses_spot_account_endpoint():
     class RawClient:
         @staticmethod
@@ -262,8 +282,10 @@ def test_close_all_positions_continues_after_one_position_fails():
 def test_close_position_writes_request_and_result_to_system_log(monkeypatch):
     captured = CapturingLogger()
     client = object.__new__(BinanceClient)
-    client.get_position_mode = lambda: False
-    client.place_market_order = lambda **_kwargs: {
+    mode_reads = []
+    order_kwargs = []
+    client.get_position_mode = lambda: mode_reads.append(True) or False
+    client.place_market_order = lambda **kwargs: order_kwargs.append(kwargs) or {
         "orderId": 123, "status": "FILLED", "executedQty": "0.01",
         "avgPrice": "80000",
     }
@@ -277,6 +299,9 @@ def test_close_position_writes_request_and_result_to_system_log(monkeypatch):
     assert "提交市价平仓订单" in output
     assert "市价平仓订单已提交" in output
     assert "order_id=123" in output
+    assert mode_reads == [True]
+    assert order_kwargs[0]["position_mode"] is False
+    assert order_kwargs[0]["reduce_only"] is True
 
 
 def test_close_all_positions_logs_completion_summary(monkeypatch):

@@ -501,20 +501,29 @@ class RealtimeStrategyTab(BacktestTab):
     def _configure_exchange_settings(
             client, symbol: str, has_account_position: bool,
             has_symbol_position: bool) -> None:
-        """仅在无持仓时修改交易所模式，已有持仓沿用其当前设置。"""
+        """确认账户为单向持仓；仅在无持仓时修改账户级设置。"""
         # 界面杠杆只放大名义下单金额；交易所账户始终使用约定配置。
         # Binance 禁止账户有仓位时切换持仓/保证金资产模式。
+        position_mode = client.get_position_mode()
+        if position_mode is None:
+            raise RuntimeError("无法确认 Binance 账户持仓模式")
+        if position_mode is not False:
+            if has_account_position:
+                raise RuntimeError(
+                    "账户当前为双向持仓模式且已有持仓，无法切换为单向持仓模式；"
+                    "请先平掉账户持仓后重试")
+            if not client.set_position_mode(False) \
+                    or client.get_position_mode() is not False:
+                raise RuntimeError("无法设置单向持仓模式")
+
         if not has_account_position:
-            if client.get_position_mode() is not False:
-                if not client.set_position_mode(False) \
-                        or client.get_position_mode() is not False:
-                    raise RuntimeError("无法设置单向持仓模式")
             if client.get_multi_assets_mode() is not False:
                 if not client.set_multi_assets_mode(False) \
                         or client.get_multi_assets_mode() is not False:
                     raise RuntimeError("无法设置单币保证金模式")
         else:
-            get_logger().info("账户已有持仓，跳过持仓模式和保证金资产模式设置")
+            get_logger().info(
+                "账户已有持仓，已确认单向持仓模式；跳过保证金资产模式设置")
 
         # 全仓/逐仓模式属于交易对设置，该交易对已有仓位时不发起修改请求。
         if not has_symbol_position:

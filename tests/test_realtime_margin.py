@@ -231,10 +231,39 @@ def test_startup_displays_configured_capital_without_active_session():
     assert RealtimeStrategyTab._initial_strategy_capital(None, 8000) == 8000
 
 
-def test_existing_position_skips_all_position_mode_changes():
+def test_empty_account_is_switched_to_one_way_mode_before_startup():
+    calls = []
+    position_modes = iter((True, False))
+    client = SimpleNamespace(
+        get_position_mode=lambda: calls.append("get-position-mode")
+        or next(position_modes),
+        set_position_mode=lambda mode: calls.append(
+            ("set-position-mode", mode)) or True,
+        get_multi_assets_mode=lambda: False,
+        set_multi_assets_mode=lambda _mode: True,
+        set_cross_margin=lambda symbol: calls.append(
+            ("set-cross-margin", symbol)) or True,
+        set_leverage=lambda symbol, leverage: calls.append(
+            ("set-leverage", symbol, leverage)) or True,
+    )
+
+    RealtimeStrategyTab._configure_exchange_settings(
+        client, "BTCUSDT", has_account_position=False,
+        has_symbol_position=False)
+
+    assert calls == [
+        "get-position-mode",
+        ("set-position-mode", False),
+        "get-position-mode",
+        ("set-cross-margin", "BTCUSDT"),
+        ("set-leverage", "BTCUSDT", 100),
+    ]
+
+
+def test_existing_position_confirms_one_way_and_skips_mode_changes():
     calls = []
     client = SimpleNamespace(
-        get_position_mode=lambda: calls.append("get-position-mode"),
+        get_position_mode=lambda: calls.append("get-position-mode") or False,
         set_position_mode=lambda _mode: calls.append("set-position-mode"),
         get_multi_assets_mode=lambda: calls.append("get-assets-mode"),
         set_multi_assets_mode=lambda _mode: calls.append("set-assets-mode"),
@@ -247,13 +276,16 @@ def test_existing_position_skips_all_position_mode_changes():
         client, "BTCUSDT", has_account_position=True,
         has_symbol_position=True)
 
-    assert calls == [("set-leverage", "BTCUSDT", 100)]
+    assert calls == [
+        "get-position-mode",
+        ("set-leverage", "BTCUSDT", 100),
+    ]
 
 
 def test_other_symbol_position_only_skips_account_level_mode_changes():
     calls = []
     client = SimpleNamespace(
-        get_position_mode=lambda: calls.append("get-position-mode"),
+        get_position_mode=lambda: calls.append("get-position-mode") or False,
         set_position_mode=lambda _mode: calls.append("set-position-mode"),
         get_multi_assets_mode=lambda: calls.append("get-assets-mode"),
         set_multi_assets_mode=lambda _mode: calls.append("set-assets-mode"),
@@ -268,9 +300,19 @@ def test_other_symbol_position_only_skips_account_level_mode_changes():
         has_symbol_position=False)
 
     assert calls == [
+        "get-position-mode",
         ("set-cross-margin", "BTCUSDT"),
         ("set-leverage", "BTCUSDT", 100),
     ]
+
+
+def test_existing_position_in_hedge_mode_prevents_startup():
+    client = SimpleNamespace(get_position_mode=lambda: True)
+
+    with pytest.raises(RuntimeError, match="双向持仓模式且已有持仓"):
+        RealtimeStrategyTab._configure_exchange_settings(
+            client, "BTCUSDT", has_account_position=True,
+            has_symbol_position=True)
 
 
 def test_order_time_is_displayed_in_system_local_timezone():

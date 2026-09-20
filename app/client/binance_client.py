@@ -221,6 +221,11 @@ class BinanceClient:
         self.last_user_data_stream_error = None
         self.last_futures_account_error = None
         self.last_spot_account_error = None
+        # Last successfully confirmed account position mode. Order placement
+        # can happen while the mode endpoint is temporarily unavailable; a
+        # cached verified value prevents one transient read from reinterpreting
+        # a one-way close as a hedge-mode order.
+        self._position_mode_cache = None
         
         # 初始化的时候设置时间戳偏移
         self.last_time_sync = 0  # 记录上次同步时间
@@ -952,10 +957,17 @@ class BinanceClient:
             self.set_timestamp_offset(force=True)
             result = self.client.futures_get_position_mode()
             # result is a dict with 'dualSidePosition' key
-            return result.get('dualSidePosition', False)
+            mode = bool(result.get('dualSidePosition', False))
+            self._position_mode_cache = mode
+            return mode
         except Exception as e:
             logger.debug(f"Failed to get position mode: {e}")
-            return None
+            cached_mode = getattr(self, '_position_mode_cache', None)
+            if cached_mode is not None:
+                logger.warning(
+                    "获取持仓模式失败，沿用最近一次已确认模式: %s",
+                    "hedge" if cached_mode else "one_way")
+            return cached_mode
     
     def set_position_mode(self, hedge_mode: bool = False) -> bool:
         """Set position mode: True = Hedge Mode, False = One-way Mode"""
@@ -966,9 +978,11 @@ class BinanceClient:
             return False
         try:
             self.client.futures_change_position_mode(dualSidePosition=hedge_mode)
+            self._position_mode_cache = bool(hedge_mode)
             return True
         except Exception as e:
             if getattr(e, "code", None) == -4059 or "No need to change" in str(e):
+                self._position_mode_cache = bool(hedge_mode)
                 return True
             logger.debug(f"Failed to set position mode: {e}")
             return False
@@ -999,7 +1013,9 @@ class BinanceClient:
             logger.debug(f"Failed to set multi assets mode: {e}")
             return False
     
-    def place_market_order(self, symbol: str, side: str, quantity: float, position_side: str = None, reduce_only: bool = False) -> Optional[dict]:
+    def place_market_order(self, symbol: str, side: str, quantity: float,
+                           position_side: str = None, reduce_only: bool = False,
+                           position_mode: Optional[bool] = None) -> Optional[dict]:
         """Place a market order
         
         Args:
@@ -1008,6 +1024,7 @@ class BinanceClient:
             quantity: Order quantity
             position_side: Position side (LONG/SHORT) for hedge mode
             reduce_only: If True, order will only reduce position (for closing positions)
+            position_mode: Already confirmed account mode. If omitted, query it.
         """
         # 实现时间戳错误重试机制
         for attempt in range(self.MAX_TIMESTAMP_RETRIES + 1):
@@ -1029,7 +1046,8 @@ class BinanceClient:
                 # Check position mode
                 # 默认使用对冲模式（双向持仓），因为 Binance 账户设置的就是双向持仓模式
                 # 即使 get_position_mode() 因时间戳等错误失败，也不会错误地以单向模式下单
-                position_mode = self.get_position_mode()
+                if position_mode is None:
+                    position_mode = self.get_position_mode()
                 if position_mode is None:
                     logger.warning(f"⚠️ get_position_mode() 失败，默认使用对冲模式（双向持仓）: symbol={symbol}, side={side}")
                     position_mode = True  # 默认对冲模式
@@ -3369,7 +3387,8 @@ class BinanceClient:
                     side=order_side,
                     quantity=quantity,
                     position_side=current_side,  # Required for hedge mode
-                    reduce_only=False  # Not supported in hedge mode
+                    reduce_only=False,  # Not supported in hedge mode
+                    position_mode=position_mode,
                 )
             else:
                 # One-way Mode: Use reduceOnly, do NOT use position_side
@@ -3378,7 +3397,8 @@ class BinanceClient:
                     side=order_side,
                     quantity=quantity,
                     position_side=None,  # Not needed in one-way mode
-                    reduce_only=True  # Required for one-way mode to close position
+                    reduce_only=True,  # Required for one-way mode to close position
+                    position_mode=position_mode,
                 )
             if not result or result.get('error'):
                 close_logger.error(
